@@ -15,6 +15,11 @@ GMAIL_DEFAULTS = {
 IMAP_DEFAULTS = {"port": 993, "inbox": "INBOX", "search": "UNSEEN", "days": 7, "folders": {}}
 TYPES = {"gmail": GMAIL_DEFAULTS, "imap": IMAP_DEFAULTS}
 NOT_INHERITED = ("llm_server", "accounts", "prompts")
+TYPE_KEYS = {
+    "gmail": {"email", "app_password", "search", "label_prefix", "processed_label",
+              "archive_categories"},
+    "imap": {"host", "port", "username", "password", "inbox", "days", "folders"},
+}
 
 
 def _rules(r) -> list:
@@ -81,7 +86,9 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     top = {k: v for k, v in raw.items() if k not in NOT_INHERITED}
     top_prompts = raw.get("prompts") or {}
     accounts_raw = raw.get("accounts")
-    if accounts_raw is None and "email" in raw and "app_password" in raw:
+    if accounts_raw is None and ("email" in raw or "app_password" in raw):
+        if not str(raw.get("email") or "").strip() or not str(raw.get("app_password") or "").strip():
+            raise Stop("Заполните email и app_password в config.json.")
         accounts_raw = [{"name": raw["email"], "type": "gmail"}]  # старый формат
     if not isinstance(accounts_raw, list) or not accounts_raw:
         raise Stop("В config.json нет ни одного ящика (список accounts).")
@@ -100,7 +107,9 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         if typ not in TYPES:
             raise Stop(f"Ящик «{name}»: неизвестный type «{typ}» (нужен gmail или imap).")
 
-        acc = {**COMMON_DEFAULTS, **TYPES[typ], **top, **a, "name": name}
+        other = set().union(*(v for k, v in TYPE_KEYS.items() if k != typ))
+        inherited = {k: v for k, v in top.items() if k not in other}
+        acc = {**COMMON_DEFAULTS, **TYPES[typ], **inherited, **a, "name": name}
         mine = a.get("prompts") or {}
         prompts = {**DEFAULT_PROMPTS, **top_prompts, **mine}
         prompts["rules"] = _rules(top_prompts.get("rules")) + _rules(mine.get("rules"))

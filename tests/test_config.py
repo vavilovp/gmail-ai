@@ -58,6 +58,34 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual((w["port"], w["inbox"], w["search"], w["days"], w["folders"]),
                          (993, "INBOX", "UNSEEN", 7, {}))
 
+    def test_type_specific_keys_not_inherited_across_types(self):
+        cfg = load({"categories": {"A": "a", "B": "b"}, "search": "in:inbox is:unread",
+                    "archive_categories": ["B"], "days": 3, "email": "t@gmail.com",
+                    "app_password": "abcd efgh ijkl mnop", "accounts": [GMAIL, IMAP]})
+        g, w = cfg["accounts"]
+        self.assertEqual(g["search"], "in:inbox is:unread")
+        self.assertEqual(g["archive_categories"], ["B"])
+        self.assertNotIn("days", g)
+        self.assertEqual(w["search"], "UNSEEN")
+        self.assertEqual(w["days"], 3)
+        for k in ("archive_categories", "email", "app_password"):
+            self.assertNotIn(k, w)
+
+    def test_legacy_incomplete_credentials(self):
+        for c in ({"email": "me@gmail.com"}, {"app_password": "abcd"},
+                  {"email": "me@gmail.com", "app_password": ""}):
+            with self.assertRaises(Stop) as cm:
+                load({"categories": CATS, **c})
+            self.assertIn("Заполните email и app_password", str(cm.exception))
+
+    def test_password_placeholder_alone(self):
+        with self.assertRaises(Stop):
+            load({"categories": CATS, "accounts": [{**GMAIL, "app_password": "xxxx xxxx xxxx xxxx"}]})
+
+    def test_rules_string(self):
+        a = load({"categories": CATS, "prompts": {"rules": "одно"}, "accounts": [GMAIL]})["accounts"][0]
+        self.assertEqual(a["prompts"]["rules"], ["одно"])
+
     def test_errors(self):
         def bad(cfg, *needles):
             with self.assertRaises(Stop) as cm:
