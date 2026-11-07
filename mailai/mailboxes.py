@@ -247,10 +247,11 @@ def _list_names(data) -> set:
 class ImapBox(Mailbox):
     moved_title = "Перенесено в папки"
 
-    def __init__(self, acc: dict, log, dry: bool, state_dir: Path = STATE_DIR):
+    def __init__(self, acc: dict, log, dry: bool, state_dir: Path = None):
         super().__init__(acc, log, dry)
         self.address = acc["username"]
         self.imap = None
+        state_dir = STATE_DIR if state_dir is None else state_dir  # во время вызова: тесты подменяют
         self.state_path = Path(state_dir) / f"{safe_name(acc['name'])}.json"
         self.processed: list = []    # ключи обработанных писем, старые в начале
         self._seen: set = set()

@@ -150,7 +150,9 @@ class ProcessAccountTest(unittest.TestCase):
     def test_real_digest_gets_only_kept(self):
         box = FakeBox([(b"1", "Архив"), (b"2", None)])
         logs = []
-        with patch("gmail_ai.make_mailbox", lambda acc_, log, d: box),                 patch("gmail_ai.classify", lambda s, a, m: {**result(), "summary": "суть " + m["subject"]}),                 patch("mailai.llm.llm_call", return_value=" Итог ") as m:
+        with patch("gmail_ai.make_mailbox", lambda acc_, log, d: box), \
+                patch("gmail_ai.classify", lambda s, a, m: {**result(), "summary": "суть " + m["subject"]}), \
+                patch("mailai.llm.llm_call", return_value=" Итог ") as m:
             res = gmail_ai.process_account(
                 SRV, acc(prompts={"digest": "П"}), False, None, logs.append)
         self.assertEqual(res["summary"], "Итог")
@@ -160,7 +162,9 @@ class ProcessAccountTest(unittest.TestCase):
 
     def test_digest_exception_does_not_abort(self):
         box = FakeBox([(b"1", None)])
-        with patch("gmail_ai.make_mailbox", lambda acc_, log, d: box),                 patch("gmail_ai.classify", lambda s, a, m: result()),                 patch("gmail_ai.digest", side_effect=KeyError("x")):
+        with patch("gmail_ai.make_mailbox", lambda acc_, log, d: box), \
+                patch("gmail_ai.classify", lambda s, a, m: result()), \
+                patch("gmail_ai.digest", side_effect=KeyError("x")):
             res = gmail_ai.process_account(SRV, acc(), False, None, lambda m: None)
         self.assertIn("не удалось составить сводку", res["summary"])
         self.assertEqual(len(res["results"]), 1)
@@ -182,7 +186,10 @@ class ProcessAccountTest(unittest.TestCase):
                     if acc_["type"] == "imap":
                         return ImapBox(acc_, log, dry, state_dir=Path(tmp.name))
                     return real_make(acc_, log, dry)
-                with patch("mailai.mailboxes.IMAP_SSL", lambda *a_, **k: fake),                         patch("mailai.mailboxes._today", lambda: date(2026, 11, 7)),                         patch("gmail_ai.make_mailbox", make),                         patch("gmail_ai.classify") as cl:
+                with patch("mailai.mailboxes.IMAP_SSL", lambda *a_, **k: fake), \
+                        patch("mailai.mailboxes._today", lambda: date(2026, 11, 7)), \
+                        patch("gmail_ai.make_mailbox", make), \
+                        patch("gmail_ai.classify") as cl:
                     res = gmail_ai.process_account(SRV, a, False, None, lambda m: None)
                 self.assertIn("SEARCH", "".join(c[1] for c in fake.calls if c[0] == "uid"))
                 self.assertIsNotNone(res["fatal"])
@@ -278,8 +285,13 @@ class PipelineTest(unittest.TestCase):
         boxes = {"A": FakeBox([(b"1", None)]), "B": FakeBox([(b"2", None)])}
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        with patch("gmail_ai.load_config",
-                   lambda: {"llm_server": {}, "accounts": accounts}),                 patch("gmail_ai.make_mailbox", lambda a, log, d: boxes[a["name"]]),                 patch("gmail_ai.server_ready", lambda s: True),                 patch("gmail_ai.classify", lambda s, a, m: result()),                 patch("mailai.llm.llm_call", side_effect=RuntimeError("упал")),                 patch("gmail_ai.REPORTS_DIR", Path(tmp.name)),                 patch("gmail_ai.webbrowser.open"):
+        with patch("gmail_ai.load_config", lambda: {"llm_server": {}, "accounts": accounts}), \
+                patch("gmail_ai.make_mailbox", lambda a, log, d: boxes[a["name"]]), \
+                patch("gmail_ai.server_ready", lambda s: True), \
+                patch("gmail_ai.classify", lambda s, a, m: result()), \
+                patch("mailai.llm.llm_call", side_effect=RuntimeError("упал")), \
+                patch("gmail_ai.REPORTS_DIR", Path(tmp.name)), \
+                patch("gmail_ai.webbrowser.open"):
             total, ok = gmail_ai.pipeline(Namespace(dry_run=False, limit=None), lambda m: None)
         self.assertEqual(total, "A: 1 (ждут ответа 0) · B: 1 (ждут ответа 0)")
         self.assertTrue(ok)
