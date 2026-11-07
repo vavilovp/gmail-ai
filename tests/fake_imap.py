@@ -12,12 +12,16 @@ class FakeImap:
         self.messages = {}               # uid -> raw bytes
         self.gm_msgids = {}              # uid -> X-GM-MSGID (только Gmail)
         self.login_ok = True
+        self.fail_cmds = set()           # UID-команды, на которые сервер ответит NO
+        self.uid_after_literal = False   # UID в ответе FETCH после литерала (как у части серверов)
         # журнал и состояние
         self.calls = []                  # [("login", user, pwd), ("uid", "STORE", ...), ...]
         self.search_args = None
         self.selected = None
         self.readonly = None
         self.created = []
+        self.flags = {}                  # uid -> set флагов
+        self.copied = []                 # [(uid, папка)]
 
     # --- соединение ---
     def login(self, user, password):
@@ -40,6 +44,13 @@ class FakeImap:
         self.calls.append(("logout",))
         return "BYE", [b"bye"]
 
+    def expunge(self):
+        """Общий EXPUNGE — ImapBox его вызывать не должен."""
+        self.calls.append(("expunge",))
+        for u in [u for u, f in self.flags.items() if "\\Deleted" in f]:
+            self.messages.pop(u, None)
+        return "OK", [None]
+
     # --- папки ---
     def list(self, directory='""', pattern="*"):
         self.calls.append(("list", directory, pattern))
@@ -50,31 +61,69 @@ class FakeImap:
 
     def create(self, name):
         self.calls.append(("create", name))
-        self.folders.add(name)
+        self.folders.add(name.strip('"'))
         self.created.append(name)
         return "OK", [b"created"]
 
     # --- UID-команды ---
+    @staticmethod
+    def _uid_set(arg):
+        if isinstance(arg, bytes):
+            arg = arg.decode()
+        return [int(x) for x in str(arg).split(",")]
+
+    def _fetch(self, uids, items):
+        m = re.search(r"HEADER\.FIELDS \(([^)]*)\)", items)
+        out = []
+        for u in uids:
+            if u not in self.messages:
+                continue
+            raw = self.messages[u]
+            if m:
+                wanted = {f.upper() for f in m.group(1).split()}
+                head = raw.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
+                data = b"".join(l + b"\r\n" for l in head
+                                if l.split(b":", 1)[0].decode().upper() in wanted) + b"\r\n"
+                section = f"BODY[HEADER.FIELDS ({m.group(1)})]"
+            else:
+                data, section = raw, "BODY[]"
+            if self.uid_after_literal:
+                out += [(f"{u} ({section} {{{len(data)}}}".encode(), data), f" UID {u})".encode()]
+                continue
+            meta = f"{u} (UID {u}"
+            if u in self.gm_msgids:
+                meta += f" X-GM-MSGID {self.gm_msgids[u]}"
+            meta += f" {section} {{{len(data)}}}"
+            out += [(meta.encode(), data), b")"]
+        return out
+
     def uid(self, cmd, *args):
         cmd = cmd.upper()
         self.calls.append(("uid", cmd) + args)
+        if cmd in self.fail_cmds:
+            return "NO", [b"failed"]
         if cmd == "SEARCH":
             self.search_args = args
             return "OK", [b" ".join(str(u).encode() for u in sorted(self.messages))]
         if cmd == "FETCH":
-            u = int(args[0])
-            if u not in self.messages:
-                return "NO", [b"no such message"]
-            raw = self.messages[u]
-            meta = f"{u} (UID {u}"
-            if u in self.gm_msgids:
-                meta += f" X-GM-MSGID {self.gm_msgids[u]}"
-            meta += f" BODY[] {{{len(raw)}}}"
-            return "OK", [(meta.encode(), raw), b")"]
-        if cmd in ("STORE", "COPY", "EXPUNGE"):
+            out = self._fetch(self._uid_set(args[0]), args[1])
+            return ("OK", out) if out else ("NO", [b"no such message"])
+        if cmd == "STORE":
+            if args[1] == "+FLAGS":
+                for u in self._uid_set(args[0]):
+                    self.flags.setdefault(u, set()).update(args[2].strip("()").split())
+            return "OK", [b"done"]
+        if cmd == "COPY":
+            self.copied += [(u, args[1]) for u in self._uid_set(args[0])]
+            return "OK", [b"done"]
+        if cmd == "EXPUNGE":
+            for u in self._uid_set(args[0]):
+                if "\\Deleted" in self.flags.get(u, ()):
+                    self.messages.pop(u, None)
             return "OK", [b"done"]
         if cmd == "MOVE":
-            self.messages.pop(int(args[0]), None)
+            for u in self._uid_set(args[0]):
+                self.messages.pop(u, None)
             return "OK", [b"moved"]
         return "BAD", [b"unknown command"]
 

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from mailai.common import Stop
-from mailai.mailboxes import GmailBox, make_mailbox
+from mailai.mailboxes import GmailBox, ImapBox, make_mailbox
 from tests.fake_imap import FakeImap, make_raw
 
 
@@ -87,9 +87,19 @@ class GmailBoxTest(unittest.TestCase):
         b.close()
         self.assertIn(("logout",), self.fake.calls)
 
-    def test_imap_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            make_mailbox({"type": "imap"}, print, False)
+    def test_login_fail_then_close_logs_out(self):
+        self.fake.login_ok = False
+        b = make_mailbox(acc(), self.logs.append, False)
+        with self.assertRaises(Stop):
+            b.connect()
+        b.close()
+        self.assertIn(("logout",), self.fake.calls)
+
+    def test_make_mailbox_imap(self):
+        imap_acc = {"name": "Работа", "type": "imap", "host": "mail.corp.ru", "port": 993,
+                    "username": "me@corp.ru", "password": "p", "inbox": "INBOX", "search": "UNSEEN",
+                    "days": 7, "folders": {}}
+        self.assertIsInstance(make_mailbox(imap_acc, print, False), ImapBox)
 
 
 if __name__ == "__main__":
