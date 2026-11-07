@@ -19,10 +19,10 @@ tr.imp-0 td:nth-child(2){font-weight:600}
 a{color:#1a55a8;text-decoration:none}"""
 
 
-def _rows(items: list, imap: bool) -> str:
+def _rows(items: list, imap: bool, cat_head: str = "Категория") -> str:
     if not items:
         return "<p class='empty'>—</p>"
-    out = ["<table><tr><th>От</th><th>Тема</th><th>Суть</th><th>Категория</th></tr>"]
+    out = [f"<table><tr><th>От</th><th>Тема</th><th>Суть</th><th>{cat_head}</th></tr>"]
     for r in items:
         subj = esc(r["subject"])
         if r.get("link"):
@@ -45,7 +45,7 @@ def _list(title: str, items: list) -> str:
 
 def _heading(a: dict) -> str:
     kind = "IMAP" if a["type"] == "imap" else "Gmail"
-    addr = f" · {esc(a['address'])}" if a.get("address") else ""
+    addr = f" · {esc(a['address'])}" if a.get("address") and a["address"] != a["name"] else ""
     return f"{esc(a['name'])} ({kind}{addr})"
 
 
@@ -73,7 +73,8 @@ def _section(n: int, a: dict, dry: bool) -> str:
                 f"<h2>Ждут вашего ответа ({len(reply)})</h2>{_rows(reply, imap)}"
                 f"<h2>Важное ({len(important)})</h2>{_rows(important, imap)}"
                 f"<h2>Остальное ({len(rest)})</h2>{_rows(rest, imap)}"
-                f"<h2>{esc(title)} ({len(moved)})</h2>{_rows(moved, imap)}")
+                f"<h2>{esc(title)} ({len(moved)})</h2>"
+                f"{_rows(moved, imap, 'Категория → папка' if imap else 'Категория')}")
     return head + body + _list("Предупреждения", a.get("warnings") or []) + \
         _list("Ошибки", a.get("errors") or [])
 

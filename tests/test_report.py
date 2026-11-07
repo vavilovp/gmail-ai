@@ -29,6 +29,18 @@ class ReportTest(unittest.TestCase):
         self.assertIn("Первый (Gmail · me@x.org)", out)
         self.assertLess(out.index("id='acc-1'"), out.index("id='acc-2'"))
 
+    def test_heading_without_repeated_address(self):
+        out = build_report([acc("me@gmail.com", address="me@gmail.com")], False)
+        self.assertIn("me@gmail.com (Gmail)</h2>", out)
+
+    def test_imap_moved_column_header(self):
+        moved = mail("Перенесённое", category="Рассылки", moved="AI/Рассылки")
+        out = build_report([acc("Работа", "imap", results=[moved, mail()])], False)
+        self.assertEqual(out.count("<th>Категория → папка</th>"), 1)
+        self.assertIn("Рассылки → AI/Рассылки", out)
+        gm = build_report([acc(results=[mail(moved="архив")])], False)
+        self.assertNotIn("Категория → папка", gm)
+
     def test_fatal_account(self):
         out = build_report([acc(fatal="Gmail не пустил", results=[mail("СекретнаяТема")])], False)
         self.assertGreaterEqual(out.count("Gmail не пустил"), 2)

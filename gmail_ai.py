@@ -19,7 +19,7 @@ IMAP: обработанные запоминаются в файле state/<и�
 Запуск:
   py gmail_ai.py              — в консоли
   py gmail_ai.py --dry-run    — тест: в почте ничего не меняется
-  py gmail_ai.py --limit 10   — не больше 10 писем
+  py gmail_ai.py --limit 10   — не больше 10 писем в каждом ящике
   pyw gmail_ai.py --ask       — окно «Разобрать почту?» и окно прогресса (для Планировщика)
   pyw gmail_ai.py --gui       — окно прогресса без вопроса
 """
@@ -50,7 +50,7 @@ def process_account(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) ->
         log(f"[{name}] {msg}")
 
     limit = limit or acc.get("max_emails", 50)
-    alog(f"Подключаюсь к ящику «{name}»…")
+    alog("Подключаюсь…")
     box = make_mailbox(acc, alog, dry)
     results, errors, fatal = [], [], None
     try:
@@ -101,11 +101,13 @@ def account_line(a: dict) -> str:
     if a["fatal"]:
         return f"{a['name']}: ошибка"
     reply = sum(r["needs_reply"] and r["moved"] is None for r in a["results"])
-    return f"{a['name']}: {len(a['results'])} (ждут ответа {reply})"
+    errors = f", ошибок {len(a['errors'])}" if a["errors"] else ""
+    return f"{a['name']}: {len(a['results'])} (ждут ответа {reply}{errors})"
 
 
 def pipeline(args, log, cancel=None):
-    """Полный цикл: модель → все ящики → отчёт → выключение модели. Возвращает текст итога."""
+    """Полный цикл: модель → все ящики → отчёт → выключение модели.
+    Возвращает (текст итога, ok); ok — ни один ящик не упал и ни одно письмо не дало ошибку."""
     cfg = load_config()
     srv = cfg["llm_server"]
     proc = None
@@ -128,16 +130,16 @@ def pipeline(args, log, cancel=None):
             webbrowser.open(path.as_uri())
             total = " · ".join(account_line(a) for a in accounts)
         log(total)
-        return total
+        return total, not any(a["fatal"] or a["errors"] for a in accounts)
     finally:
         if proc is not None and srv.get("stop_after", True):
             stop_server(proc, log)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Разбор Gmail локальной LLM")
+    ap = argparse.ArgumentParser(description="Разбор почты локальной LLM")
     ap.add_argument("--dry-run", action="store_true", help="ничего не менять в почте")
-    ap.add_argument("--limit", type=int, help="максимум писем за запуск")
+    ap.add_argument("--limit", type=int, help="максимум писем за запуск в каждом ящике")
     ap.add_argument("--ask", action="store_true", help="сначала спросить в окне, потом окно прогресса")
     ap.add_argument("--gui", action="store_true", help="окно прогресса без вопроса")
     args = ap.parse_args()

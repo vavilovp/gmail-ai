@@ -25,8 +25,8 @@ def ask_dialog() -> bool:
     root.attributes("-topmost", True)
     ans = messagebox.askyesno(
         "Разбор почты",
-        "Разобрать входящие Gmail локальной моделью?\n\n"
-        "Модель запустится, разберёт новые письма, откроет отчёт и выключится.",
+        "Разобрать почту локальной моделью?\n\n"
+        "Модель запустится, разберёт новые письма во всех ящиках, откроет отчёт и выключится.",
         parent=root)
     root.destroy()
     return bool(ans)
@@ -73,8 +73,8 @@ def run_gui(args, pipeline_fn):
 
     def worker():
         try:
-            total = pipeline_fn(args, log, cancel)
-            q.put(("done", total))
+            total, ok = pipeline_fn(args, log, cancel)
+            q.put(("done" if ok else "errors", total))
         except Stop as e:
             log(str(e))
             q.put(("fail", str(e).splitlines()[0]))
@@ -94,8 +94,9 @@ def run_gui(args, pipeline_fn):
                     if kind == "done":
                         status.configure(text="Готово. " + val, fg="#1d6b2f", wraplength=650, justify="left")
                         root.after(30000, root.destroy)  # закрыть само через 30 с
-                    else:
-                        status.configure(text=val, fg="#b00020", wraplength=650, justify="left")
+                    else:  # сбой или ошибки в ящиках: окно остаётся, пока его не закроют
+                        text = "Готово, есть ошибки (см. отчёт). " + val if kind == "errors" else val
+                        status.configure(text=text, fg="#b00020", wraplength=650, justify="left")
                         root.attributes("-topmost", True)
         except queue.Empty:
             pass

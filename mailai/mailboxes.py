@@ -10,7 +10,7 @@ import urllib.parse
 from datetime import date, timedelta
 from pathlib import Path
 
-from mailai.common import STATE_DIR, Stop, imap_utf7, parse_message, safe_name
+from mailai.common import STATE_DIR, Stop, imap_utf7, imap_utf7_decode, parse_message, safe_name
 
 IMAP_SSL = imaplib.IMAP4_SSL  # тесты подменяют
 IMAP_TIMEOUT = 60      # с: без него зависший сервер держит разбор бесконечно
@@ -390,21 +390,32 @@ class ImapBox(Mailbox):
             self._delim = _list_delimiter(data) if typ == "OK" else ""
         return imap_utf7(folder.replace("/", self._delim) if self._delim else folder)
 
-    def _ensure_folder(self, name: str, folder: str) -> None:
+    def _find_folder(self, name: str):
+        """Существующая папка с этим именем; без учёта регистра — как в Exchange."""
+        if name in self._folders:
+            return name
+        want = imap_utf7_decode(name).casefold()
+        return next((f for f in sorted(self._folders) if imap_utf7_decode(f).casefold() == want), None)
+
+    def _ensure_folder(self, name: str, folder: str) -> str:
+        """Имя папки на сервере, куда переносить; при необходимости папка создаётся."""
         if self._folders is None:
             typ, data = self.imap.list()
             self._folders = _list_names(data) if typ == "OK" else set()
-        if name in self._folders:
-            return
+        found = self._find_folder(name)
+        if found is not None:
+            return found
         typ, data = self.imap.create(_quote(name))
         if typ != "OK":
             # напр. «уже существует», хотя в LIST её не было: проверяем заново
             typ2, data2 = self.imap.list()
             if typ2 == "OK":
                 self._folders = _list_names(data2)
-            if name not in self._folders:
-                raise RuntimeError(f"не удалось создать папку «{folder}»: {data}")
-            return
+            found = self._find_folder(name)
+            if found is None:  # решит сам перенос: ошибка будет, только если не удастся и он
+                self.log(f"Не удалось создать папку «{folder}» ({data}), всё равно пробую перенести письмо.")
+                return name
+            return found
         self.log(f"Создана папка «{folder}»")
         self._folders.add(name)
         # Outlook и Thunderbird показывают только папки, на которые есть подписка
@@ -414,17 +425,19 @@ class ImapBox(Mailbox):
             typ, data = "NO", e
         if typ != "OK":
             self.log(f"Не удалось подписаться на папку «{folder}»: {data}")
+        return name
 
     def _move(self, uid: bytes, folder: str) -> bool:
         """Перенести письмо; True — оно убрано из «Входящих»."""
-        name = self._server_name(folder)
-        self._ensure_folder(name, folder)
+        name = self._ensure_folder(self._server_name(folder), folder)
         target, what = _quote(name), f"не удалось перенести письмо в «{folder}»"
         if "MOVE" in self._caps:
             _ok(self.imap.uid("MOVE", uid, target), what)
+            self._folders.add(name)  # папка точно есть, даже если LIST её не показал
             return True
         # UIDPLUS: копия + удаление только этого письма; общий EXPUNGE не трогаем
         _ok(self.imap.uid("COPY", uid, target), what)
+        self._folders.add(name)
         try:  # копия уже в папке: дальше письмо в любом случае считается обработанным
             _ok(self.imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)"), "не удалось пометить на удаление")
             _ok(self.imap.uid("EXPUNGE", uid), "не удалось удалить")

@@ -62,6 +62,19 @@ def imap_utf7(s: str) -> str:
     return "".join(out)
 
 
+def imap_utf7_decode(s: str) -> str:
+    """Обратное к imap_utf7: имя папки с сервера → обычная строка."""
+    def dec(m):
+        b64 = m.group(1).replace(",", "/")
+        if not b64:
+            return "&"
+        try:
+            return base64.b64decode(b64 + "=" * (-len(b64) % 4)).decode("utf-16-be")
+        except (ValueError, UnicodeDecodeError):
+            return m.group(0)
+    return re.sub(r"&([A-Za-z0-9+,]*)-", dec, s)
+
+
 def html_to_text(h: str) -> str:
     h = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", " ", h)
     h = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</li>|</h\d>", "\n", h)

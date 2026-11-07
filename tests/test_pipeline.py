@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -201,6 +203,7 @@ class ProcessAccountTest(unittest.TestCase):
         self.assertGreater(len(seen), 1)
         for line in seen:
             self.assertTrue(line.startswith("[Работа] "), line)
+        self.assertIn("[Работа] Подключаюсь…", seen)
 
 
 class PipelineTest(unittest.TestCase):
@@ -221,7 +224,7 @@ class PipelineTest(unittest.TestCase):
                 patch("gmail_ai.digest", lambda *x: ""), \
                 patch("gmail_ai.REPORTS_DIR", reports), \
                 patch("gmail_ai.webbrowser.open") as wb:
-            total = gmail_ai.pipeline(Namespace(dry_run=dry, limit=None), logs.append)
+            total, self.ok = gmail_ai.pipeline(Namespace(dry_run=dry, limit=None), logs.append)
         self.reports = list(reports.glob("*.html")) if reports.exists() else []
         self.texts = [p.read_text(encoding="utf-8") for p in self.reports]
         return total, wb, st, sp
@@ -230,14 +233,43 @@ class PipelineTest(unittest.TestCase):
         total, wb, _, _ = self.run_pipeline(
             [FakeBox([(b"1", None), (b"2", None)]), FakeBox([])], [acc("A"), acc("B", "imap")])
         self.assertEqual(total, "A: 2 (ждут ответа 1) · B: 0 (ждут ответа 0)")
+        self.assertTrue(self.ok)
         self.assertEqual(len(self.reports), 1)
         wb.assert_called_once()
+
+    def test_total_line_with_errors(self):
+        def classify(s, a, m):
+            if m["subject"] == "тема 2":
+                raise ValueError("плохой ответ модели")
+            return result(reply=True)
+        boxes = [FakeBox([(b"1", None), (b"2", None)]), FakeBox([(b"3", None)])]
+        accounts = [acc("A"), acc("B", "imap")]
+        by_name = dict(zip(["A", "B"], boxes))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with patch("gmail_ai.load_config", lambda: {"llm_server": {}, "accounts": accounts}), \
+                patch("gmail_ai.make_mailbox", lambda a, log, d: by_name[a["name"]]), \
+                patch("gmail_ai.server_ready", lambda s: True), \
+                patch("gmail_ai.classify", classify), \
+                patch("gmail_ai.digest", lambda *x: ""), \
+                patch("gmail_ai.REPORTS_DIR", Path(tmp.name)), \
+                patch("gmail_ai.webbrowser.open"):
+            total, ok = gmail_ai.pipeline(Namespace(dry_run=False, limit=None), lambda m: None)
+        self.assertEqual(total, "A: 1 (ждут ответа 1, ошибок 1) · B: 1 (ждут ответа 1)")
+        self.assertFalse(ok)
+
+    def test_ok_with_warnings_only(self):
+        box = FakeBox([(b"1", None)])
+        box.warnings = ["сервер не умеет переносить"]
+        self.run_pipeline([box], [acc("A")])
+        self.assertTrue(self.ok)
 
     def test_failed_account_does_not_stop_others(self):
         total, _, _, _ = self.run_pipeline(
             [FakeBox(connect_exc=Stop("Не вошли")), FakeBox([(b"2", None)])],
             [acc("A"), acc("B", "imap")])
         self.assertEqual(total, "A: ошибка · B: 1 (ждут ответа 0)")
+        self.assertFalse(self.ok)
         self.assertIn("Не вошли", self.texts[0])
         self.assertIn("id='acc-2'", self.texts[0])
 
@@ -248,13 +280,15 @@ class PipelineTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         with patch("gmail_ai.load_config",
                    lambda: {"llm_server": {}, "accounts": accounts}),                 patch("gmail_ai.make_mailbox", lambda a, log, d: boxes[a["name"]]),                 patch("gmail_ai.server_ready", lambda s: True),                 patch("gmail_ai.classify", lambda s, a, m: result()),                 patch("mailai.llm.llm_call", side_effect=RuntimeError("упал")),                 patch("gmail_ai.REPORTS_DIR", Path(tmp.name)),                 patch("gmail_ai.webbrowser.open"):
-            total = gmail_ai.pipeline(Namespace(dry_run=False, limit=None), lambda m: None)
+            total, ok = gmail_ai.pipeline(Namespace(dry_run=False, limit=None), lambda m: None)
         self.assertEqual(total, "A: 1 (ждут ответа 0) · B: 1 (ждут ответа 0)")
+        self.assertTrue(ok)
         self.assertEqual(boxes["B"].closed, 1)
 
     def test_no_mail_no_report(self):
         total, wb, _, _ = self.run_pipeline([FakeBox([])], [acc("A")])
         self.assertEqual(total, "Новых писем нет.")
+        self.assertTrue(self.ok)
         self.assertEqual(self.reports, [])
         wb.assert_not_called()
 
@@ -268,6 +302,14 @@ class PipelineTest(unittest.TestCase):
         _, _, st, sp = self.run_pipeline([FakeBox([])], [acc("A")], ready=True)
         st.assert_not_called()
         sp.assert_not_called()
+
+
+class CliTest(unittest.TestCase):
+    def test_help_texts(self):
+        out = subprocess.run([sys.executable, "gmail_ai.py", "--help"], cwd=Path(gmail_ai.__file__).parent,
+                             capture_output=True, encoding="utf-8", check=True).stdout
+        self.assertIn("Разбор почты локальной LLM", out)
+        self.assertIn("в каждом ящике", out)
 
 
 if __name__ == "__main__":

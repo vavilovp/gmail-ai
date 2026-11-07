@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from mailai.common import Stop
+from mailai.common import Stop, imap_utf7, imap_utf7_decode
 from mailai.mailboxes import ImapBox, imap_date, mail_key, make_mailbox, uid_sets
 from tests.fake_imap import FakeImap, make_raw
 
@@ -83,6 +83,11 @@ class ImapBoxTest(unittest.TestCase):
         self.assertEqual(len(fetches), 1)
         self.assertEqual(fetches[0][0], b"1:5")
         self.assertIn("BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)]", fetches[0][1])
+
+    def test_imap_utf7_decode_round_trip(self):
+        for s in ("AI/Рассылки", "a&b", "Ünïcødé & ёжик", "plain", ""):
+            self.assertEqual(imap_utf7_decode(imap_utf7(s)), s)
+        self.assertEqual(imap_utf7_decode("&-broken&!!-"), "&broken&!!-")
 
     def test_uid_sets_ranges_and_chunks(self):
         self.assertEqual(uid_sets([b"5", b"1", b"2", b"3", b"42", b"57", b"58"]), [b"1:3,5,42,57:58"])
@@ -257,12 +262,47 @@ class ImapBoxTest(unittest.TestCase):
         self.assertEqual(self.fake.calls_of("MOVE"), [(b"1", f'"AI/{FOLDER}"')])
         self.assertEqual(len([c for c in self.fake.calls if c[0] == "list" and c[2] == "*"]), 2)
 
-    def test_create_no_raises(self):
+    def test_create_no_and_move_fails_raises(self):
         self.fake.fail_cmds = {"CREATE"}
         b = self.box()
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError) as cm:
             b.apply(b"1", "Рассылки")
-        self.assertEqual(self.fake.calls_of("MOVE"), [])
+        self.assertIn("не удалось перенести письмо в «AI/Рассылки»", str(cm.exception))
+        self.assertEqual(self.fake.calls_of("MOVE"), [(b"1", f'"AI/{FOLDER}"')])
+        self.assertIn(1, self.fake.messages)
+        self.assertTrue(any("Не удалось создать папку «AI/Рассылки»" in m for m in self.logs))
+        self.assertEqual(b.pending(10), [b"2", b"1"])
+
+    def test_create_no_but_move_works(self):
+        self.fake.fail_cmds = {"CREATE"}
+        self.fake.unlisted = {f"AI/{FOLDER}"}
+        b = self.box()
+        self.assertEqual(b.apply(b"1", "Рассылки"), "AI/Рассылки")
+        self.assertEqual(b.apply(b"2", "Рассылки"), "AI/Рассылки")
+        self.assertEqual(len(self.fake.calls_of("MOVE")), 2)
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "create"]), 1)
+
+    def test_existing_folder_other_case(self):
+        other = imap_utf7("ai/рассылки")
+        self.fake.folders = {other}
+        b = self.box()
+        self.assertEqual(b.apply(b"1", "Рассылки"), "AI/Рассылки")
+        self.assertEqual([c for c in self.fake.calls if c[0] in ("create", "subscribe")], [])
+        self.assertEqual(self.fake.calls_of("MOVE"), [(b"1", f'"{other}"')])
+
+    def test_create_no_folder_listed_in_other_case(self):
+        other = imap_utf7("ai/рассылки")
+        self.fake.unlisted = {other}
+        self.fake.fail_cmds = {"CREATE"}
+        orig_create = self.fake.create
+
+        def create(name):  # сервер говорит «уже есть», и теперь папка видна в LIST
+            self.fake.folders.add(other)
+            return orig_create(name)
+        self.fake.create = create
+        b = self.box()
+        self.assertEqual(b.apply(b"1", "Рассылки"), "AI/Рассылки")
+        self.assertEqual(self.fake.calls_of("MOVE"), [(b"1", f'"{other}"')])
 
     def test_uidplus_partial_failure_recorded(self):
         for cmd in ("STORE", "EXPUNGE"):

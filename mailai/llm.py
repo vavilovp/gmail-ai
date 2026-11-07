@@ -105,20 +105,22 @@ def start_server(srv: dict, log, cancel=None) -> subprocess.Popen:
         proc = subprocess.Popen(cmd, cwd=str(exe.parent), stdout=lf, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, creationflags=flags)
 
-    t0 = time.time()
-    while time.time() - t0 < s["startup_timeout_sec"]:
-        if proc.poll() is not None:
-            raise Stop("Модель не запустилась. Последние строки лога "
-                       f"({server_log}):\n{log_tail(server_log)}")
-        if server_ready(srv):
-            log(f"Модель готова ({time.time() - t0:.0f} с)")
-            return proc
-        if cancel is not None and cancel.is_set():
-            stop_server(proc, log)
-            raise Stop("Отменено.")
-        time.sleep(2)
-    stop_server(proc, log)
-    raise Stop(f"Модель не загрузилась за {s['startup_timeout_sec']} с. См. {server_log}")
+    try:  # любой выход отсюда, кроме готовности (в т.ч. Ctrl+C), выключает запущенную модель
+        t0 = time.time()
+        while time.time() - t0 < s["startup_timeout_sec"]:
+            if proc.poll() is not None:
+                raise Stop("Модель не запустилась. Последние строки лога "
+                           f"({server_log}):\n{log_tail(server_log)}")
+            if server_ready(srv):
+                log(f"Модель готова ({time.time() - t0:.0f} с)")
+                return proc
+            if cancel is not None and cancel.is_set():
+                raise Stop("Отменено.")
+            time.sleep(2)
+        raise Stop(f"Модель не загрузилась за {s['startup_timeout_sec']} с. См. {server_log}")
+    except BaseException:
+        stop_server(proc, log)
+        raise
 
 
 def stop_server(proc, log):

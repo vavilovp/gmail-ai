@@ -17,6 +17,7 @@ class FakeImap:
         self.quoted_empty = set()        # uid, чьи заголовки сервер отдаёт пустой строкой ""
         self.guid = False                # добавлять в ответ FETCH поле «GUID <число>» перед UID
         self.create_fail_exists = False  # при CREATE из fail_cmds папка всё же есть (гонка/регистр)
+        self.unlisted = set()            # папки, которые есть, но LIST их не показывает
         # журнал и состояние
         self.calls = []                  # [("login", user, pwd), ("uid", "STORE", ...), ...]
         self.search_args = None
@@ -122,6 +123,8 @@ class FakeImap:
         self.calls.append(("uid", cmd) + args)
         if cmd in self.fail_cmds:
             return "NO", [b"failed"]
+        if cmd in ("MOVE", "COPY") and args[1].strip('"') not in self.folders | self.unlisted:
+            return "NO", [b"[TRYCREATE] no such mailbox"]
         if cmd == "SEARCH":
             self.search_args = args
             return "OK", [b" ".join(str(u).encode() for u in sorted(self.messages))]
