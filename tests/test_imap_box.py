@@ -442,6 +442,97 @@ class ImapBoxTest(unittest.TestCase):
         self.assertIn('добавьте "verify_cert": false в настройки ящика.', msg)
         sl.assert_not_called()
 
+    # --- порт 143 и STARTTLS ---
+    def plain(self, seen):
+        """Фабрика для IMAP_PLAIN, запоминающая аргументы."""
+        def factory(*a, **k):
+            seen.append((a, k))
+            return self.fake
+        return factory
+
+    def test_starttls_auto_on_port_143(self):
+        self.fake.capabilities = ("IMAP4REV1", "STARTTLS", "MOVE")
+        seen = []
+        with patch("mailai.mailboxes.IMAP_PLAIN", self.plain(seen)), \
+             patch("mailai.mailboxes.IMAP_SSL", side_effect=AssertionError("SSL не нужен")):
+            self.box(port=143)
+        (args, kw), = seen
+        self.assertEqual(args, ("mail.corp.ru", 143))
+        self.assertEqual(kw, {"timeout": 60})
+        names = [c[0] for c in self.fake.calls]
+        self.assertLess(names.index("starttls"), names.index("login"))  # пароль — только после шифрования
+        ctx = next(c[1] for c in self.fake.calls if c[0] == "starttls")
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+
+    def test_starttls_explicit_on_other_port(self):
+        self.fake.capabilities = ("STARTTLS",)
+        seen = []
+        with patch("mailai.mailboxes.IMAP_PLAIN", self.plain(seen)):
+            self.box(port=993, security="starttls")
+        self.assertEqual(seen[0][0], ("mail.corp.ru", 993))
+        self.assertIn("starttls", [c[0] for c in self.fake.calls])
+
+    def test_ssl_explicit_on_port_143(self):
+        seen = []
+        with patch("mailai.mailboxes.IMAP_SSL", self.plain(seen)), \
+             patch("mailai.mailboxes.IMAP_PLAIN", side_effect=AssertionError("нужен SSL")):
+            self.box(port=143, security="ssl")
+        self.assertEqual(seen[0][0], ("mail.corp.ru", 143))
+        self.assertNotIn("starttls", [c[0] for c in self.fake.calls])
+
+    def test_no_starttls_refuses_login(self):
+        self.fake.capabilities = ("IMAP4REV1", "LOGINDISABLED")
+        with patch("mailai.mailboxes.IMAP_PLAIN", lambda *a, **k: self.fake), \
+             patch("mailai.mailboxes.time.sleep") as sl:
+            b = ImapBox(acc(port=143), self.logs.append, False, state_dir=self.state_dir)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+            b.close()
+        self.assertIn("не поддерживает STARTTLS", str(cm.exception))
+        names = [c[0] for c in self.fake.calls]
+        self.assertNotIn("login", names)
+        self.assertIn("shutdown", names)
+        sl.assert_not_called()
+
+    def test_starttls_verify_cert_false(self):
+        self.fake.capabilities = ("STARTTLS",)
+        with patch("mailai.mailboxes.IMAP_PLAIN", lambda *a, **k: self.fake):
+            self.box(port=143, verify_cert=False)
+        ctx = next(c[1] for c in self.fake.calls if c[0] == "starttls")
+        self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(ctx.check_hostname)
+
+    def test_starttls_cert_error_is_stop_with_hint(self):
+        self.fake.capabilities = ("STARTTLS",)
+        self.fake.starttls_error = ssl.SSLCertVerificationError(
+            1, "certificate verify failed: unable to get local issuer certificate")
+        with patch("mailai.mailboxes.IMAP_PLAIN", lambda *a, **k: self.fake), \
+             patch("mailai.mailboxes.time.sleep") as sl:
+            b = ImapBox(acc(port=143), self.logs.append, False, state_dir=self.state_dir)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+        msg = str(cm.exception)
+        self.assertIn("сертификат сервера не прошёл проверку", msg)
+        self.assertIn('"verify_cert": false', msg)
+        self.assertIn("shutdown", [c[0] for c in self.fake.calls])
+        self.assertNotIn("login", [c[0] for c in self.fake.calls])
+        sl.assert_not_called()
+
+    def test_ssl_on_plain_port_is_clear_stop(self):
+        def not_ssl(*a, **k):
+            raise ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number")
+        with patch("mailai.mailboxes.IMAP_SSL", not_ssl), \
+             patch("mailai.mailboxes.time.sleep") as sl:
+            b = ImapBox(acc(port=1430, security="ssl"), self.logs.append, False,
+                        state_dir=self.state_dir)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+        msg = str(cm.exception)
+        self.assertIn("не ответил по SSL", msg)
+        self.assertIn('"security": "starttls"', msg)
+        sl.assert_not_called()
+
     def test_search_no_raises(self):
         self.fake.fail_cmds = {"SEARCH"}
         b = self.box()

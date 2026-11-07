@@ -13,6 +13,7 @@ from pathlib import Path
 from mailai.common import STATE_DIR, Stop, imap_utf7, imap_utf7_decode, parse_message, safe_name
 
 IMAP_SSL = imaplib.IMAP4_SSL  # тесты подменяют
+IMAP_PLAIN = imaplib.IMAP4    # для STARTTLS (порт 143); тесты подменяют
 IMAP_TIMEOUT = 60      # с: без него зависший сервер держит разбор бесконечно
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 STATE_KEEP = 5000      # сколько последних обработанных писем помнить
@@ -49,6 +50,14 @@ def _unquote(s: str) -> str:
     return s
 
 
+def _shutdown(imap) -> None:
+    """Закрыть соединение без LOGOUT (вход ещё не выполнен)."""
+    try:
+        imap.shutdown()
+    except Exception:
+        pass
+
+
 def _ok(resp, what: str):
     typ, data = resp
     if typ != "OK":
@@ -64,8 +73,13 @@ class Mailbox:
         self.address = ""
         self.warnings: list = []
 
-    def _open(self, host: str, port: int, where: str, verify: bool = True, hint: str = ""):
-        """SSL-подключение с проверкой сертификата и тайм-аутом; при сбое сети — 3 попытки."""
+    def _open(self, host: str, port: int, where: str, verify: bool = True, hint: str = "",
+              starttls: bool = False):
+        """Защищённое подключение с проверкой сертификата и тайм-аутом; при сбое сети — 3 попытки.
+
+        starttls=False — SSL сразу (порт 993); True — обычное соединение и команда STARTTLS
+        (порт 143). Без шифрования вход не выполняется никогда.
+        """
         ctx = ssl.create_default_context()  # системное хранилище сертификатов Windows
         if not verify:
             ctx.check_hostname = False
@@ -75,15 +89,47 @@ class Mailbox:
         last = None
         for attempt in range(1, 4):  # при входе в систему сеть может подняться не сразу
             try:
-                return IMAP_SSL(host, port, ssl_context=ctx, timeout=IMAP_TIMEOUT)
+                if not starttls:
+                    return IMAP_SSL(host, port, ssl_context=ctx, timeout=IMAP_TIMEOUT)
+                imap = IMAP_PLAIN(host, port, timeout=IMAP_TIMEOUT)
             except ssl.SSLCertVerificationError as e:
-                raise Stop(f"Ящик «{self.acc['name']}»: сертификат сервера не прошёл проверку "
-                           f"({getattr(e, 'verify_message', None) or e}).{hint}")
+                raise self._cert_stop(e, hint)
+            except ssl.SSLError as e:  # на порту нет SSL — повторять бесполезно
+                raise Stop(f"Ящик «{self.acc['name']}»: сервер {host}:{port} не ответил по SSL ({e}). "
+                           'Если это порт для STARTTLS (обычно 143) — укажите "security": "starttls" '
+                           "в настройках ящика.")
             except OSError as e:
                 last = e
                 self.log(f"Нет связи с {where} ({e}), повтор через 20 с… [{attempt}/3]")
                 time.sleep(20)
+                continue
+            return self._starttls(imap, ctx, host, hint)
         raise Stop(f"Не удалось подключиться к {where}: {last}")
+
+    def _cert_stop(self, e, hint: str) -> Stop:
+        return Stop(f"Ящик «{self.acc['name']}»: сертификат сервера не прошёл проверку "
+                    f"({getattr(e, 'verify_message', None) or e}).{hint}")
+
+    def _starttls(self, imap, ctx, host: str, hint: str):
+        """Включить шифрование на обычном соединении; иначе закрыть его и не входить."""
+        try:
+            caps = {str(c).upper() for c in getattr(imap, "capabilities", ())}
+            if "STARTTLS" not in caps:
+                raise Stop(f"Ящик «{self.acc['name']}»: сервер {host} не поддерживает STARTTLS — "
+                           "вход без шифрования не выполняется, чтобы не передавать пароль открытым "
+                           "текстом. Узнайте у администратора порт с SSL (обычно 993).")
+            imap.starttls(ssl_context=ctx)
+        except ssl.SSLCertVerificationError as e:
+            _shutdown(imap)
+            raise self._cert_stop(e, hint)
+        except Stop:
+            _shutdown(imap)
+            raise
+        except (imaplib.IMAP4.error, OSError) as e:
+            _shutdown(imap)
+            raise Stop(f"Ящик «{self.acc['name']}»: не удалось включить шифрование STARTTLS "
+                       f"на {host}: {e}")
+        return imap
 
     def connect(self) -> None:
         raise NotImplementedError
@@ -267,7 +313,10 @@ class ImapBox(Mailbox):
     def connect(self) -> None:
         self._load_state()
         host, port = self.acc["host"], self.acc.get("port", 993)
+        sec = self.acc.get("security", "auto")
+        starttls = sec == "starttls" or (sec == "auto" and port == 143)
         imap = self._open(host, port, host, verify=self.acc.get("verify_cert", True),
+                          starttls=starttls,
                           hint=" Если это корпоративный сервер с собственным сертификатом — "
                                'добавьте "verify_cert": false в настройки ящика.')
         self.imap = imap  # сразу: close() отключится, даже если вход не удался

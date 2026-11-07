@@ -18,6 +18,7 @@ class FakeImap:
         self.guid = False                # добавлять в ответ FETCH поле «GUID <число>» перед UID
         self.create_fail_exists = False  # при CREATE из fail_cmds папка всё же есть (гонка/регистр)
         self.unlisted = set()            # папки, которые есть, но LIST их не показывает
+        self.starttls_error = None       # исключение, которое бросит starttls()
         # журнал и состояние
         self.calls = []                  # [("login", user, pwd), ("uid", "STORE", ...), ...]
         self.search_args = None
@@ -34,6 +35,15 @@ class FakeImap:
             import imaplib
             raise imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials")
         return "OK", [b"logged in"]
+
+    def starttls(self, ssl_context=None):
+        self.calls.append(("starttls", ssl_context))
+        if self.starttls_error is not None:
+            raise self.starttls_error
+        return "OK", [b"Begin TLS negotiation now"]
+
+    def shutdown(self):
+        self.calls.append(("shutdown",))
 
     def capability(self):
         self.calls.append(("capability",))

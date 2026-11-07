@@ -13,7 +13,8 @@ GMAIL_DEFAULTS = {
     "archive_categories": [],
 }
 IMAP_DEFAULTS = {"port": 993, "inbox": "INBOX", "search": "UNSEEN", "days": 7, "folders": {},
-                 "verify_cert": True}
+                 "verify_cert": True, "security": "auto"}
+SECURITY = ("auto", "ssl", "starttls")  # auto: порт 143 — STARTTLS, любой другой — SSL сразу
 TYPES = {"gmail": GMAIL_DEFAULTS, "imap": IMAP_DEFAULTS}
 NOT_INHERITED = ("llm_server", "accounts", "prompts")
 STR_KEYS = {"gmail": ("email", "app_password", "search"),
@@ -22,7 +23,8 @@ INT_KEYS = {"gmail": ("max_emails",), "imap": ("port", "days", "max_emails")}
 TYPE_KEYS = {
     "gmail": {"email", "app_password", "search", "label_prefix", "processed_label",
               "archive_categories"},
-    "imap": {"host", "port", "username", "password", "inbox", "days", "folders", "verify_cert"},
+    "imap": {"host", "port", "username", "password", "inbox", "days", "folders", "verify_cert",
+             "security"},
 }
 
 
@@ -84,6 +86,8 @@ def _check_account(acc: dict, name: str, own: dict):
     if typ == "imap":
         if not isinstance(acc["verify_cert"], bool):
             fail("verify_cert должно быть true или false.")
+        if acc["security"] not in SECURITY:
+            fail("security должно быть «auto», «ssl» или «starttls».")
         if not isinstance(acc["folders"], dict):
             fail("folders должно быть словарём «категория: папка».")
         unknown = [c for c in acc["folders"] if c not in cats]
