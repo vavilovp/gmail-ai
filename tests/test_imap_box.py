@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mailai.common import Stop
-from mailai.mailboxes import ImapBox, imap_date, mail_key, make_mailbox
+from mailai.mailboxes import ImapBox, imap_date, mail_key, make_mailbox, uid_sets
 from tests.fake_imap import FakeImap, make_raw
 
 FOLDER = "&BCAEMARBBEEESwQ7BDoEOA-"  # «Рассылки» в modified UTF-7
@@ -80,8 +80,43 @@ class ImapBoxTest(unittest.TestCase):
         self.assertEqual(b.pending(3), [b"5", b"4", b"3"])
         fetches = self.fake.calls_of("FETCH")
         self.assertEqual(len(fetches), 1)
-        self.assertEqual(fetches[0][0], b"1,2,3,4,5")
+        self.assertEqual(fetches[0][0], b"1:5")
         self.assertIn("BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)]", fetches[0][1])
+
+    def test_uid_sets_ranges_and_chunks(self):
+        self.assertEqual(uid_sets([b"5", b"1", b"2", b"3", b"42", b"57", b"58"]), [b"1:3,5,42,57:58"])
+        sets = uid_sets([str(u).encode() for u in range(1, 6000, 2)])
+        self.assertGreater(len(sets), 1)
+        self.assertTrue(all(len(s) <= 1000 for s in sets))
+        self.assertEqual(sum(len(s.split(b",")) for s in sets), 3000)
+
+    def test_header_fetch_chunked(self):
+        self.fake.messages = {u: make_raw(message_id=f"<{u}@x>") for u in range(1, 6000, 2)}
+        b = self.box()
+        self.assertEqual(len(b.pending(10000)), 3000)
+        fetches = self.fake.calls_of("FETCH")
+        self.assertGreater(len(fetches), 1)
+        self.assertTrue(all(len(f[0]) <= 1000 for f in fetches))
+
+    def test_header_fetch_contiguous_range(self):
+        self.fake.messages = {u: make_raw(message_id=f"<{u}@x>") for u in [*range(1, 51), 100]}
+        b = self.box()
+        self.assertEqual(len(b.pending(100)), 51)
+        self.assertEqual([f[0] for f in self.fake.calls_of("FETCH")], [b"1:50,100"])
+
+    def test_pending_quoted_empty_headers(self):
+        self.fake.quoted_empty = {2}
+        b = self.box()
+        self.assertEqual(b.pending(10), [b"2", b"1"])
+        b.apply(b"2", "Клиенты")
+        b.close()
+        self.assertTrue(self.read_state()[0].startswith("sha1:"))
+
+    def test_pending_guid_not_taken_for_uid(self):
+        self.fake.guid = True
+        self.write_state(["<a@x>"])
+        b = self.box()
+        self.assertEqual(b.pending(10), [b"2"])
 
     def test_pending_skips_processed(self):
         self.write_state(["<a@x>"])
@@ -161,6 +196,8 @@ class ImapBoxTest(unittest.TestCase):
         b = self.box()
         self.assertEqual(b.pending(10), [b"2", b"1"])
         self.assertTrue(any("учёт" in m for m in self.logs))
+        self.assertEqual(len(b.warnings), 1)
+        self.assertIn("повреждён", b.warnings[0])
 
     # --- перенос ---
     def test_move_with_move_capability(self):
@@ -190,6 +227,55 @@ class ImapBoxTest(unittest.TestCase):
         b.apply(b"1", "Рассылки")
         b.apply(b"2", "Рассылки")
         self.assertEqual(self.fake.created, [f'"AI/{FOLDER}"'])
+
+    def test_subscribe_after_create(self):
+        b = self.box()
+        b.apply(b"1", "Рассылки")
+        target = f'"AI/{FOLDER}"'
+        self.assertIn(("subscribe", target), self.fake.calls)
+        self.assertLess(self.fake.calls.index(("create", target)), self.fake.calls.index(("subscribe", target)))
+
+    def test_existing_folder_not_subscribed(self):
+        self.fake.folders = {f"AI/{FOLDER}"}
+        b = self.box()
+        b.apply(b"1", "Рассылки")
+        self.assertEqual([c for c in self.fake.calls if c[0] == "subscribe"], [])
+
+    def test_subscribe_failure_ignored(self):
+        self.fake.fail_cmds = {"SUBSCRIBE"}
+        b = self.box()
+        self.assertEqual(b.apply(b"1", "Рассылки"), "AI/Рассылки")
+        self.assertEqual(len(self.fake.calls_of("MOVE")), 1)
+        self.assertTrue(any("подписаться" in m for m in self.logs))
+
+    def test_create_no_but_folder_exists(self):
+        self.fake.fail_cmds = {"CREATE"}
+        self.fake.create_fail_exists = True
+        b = self.box()
+        self.assertEqual(b.apply(b"1", "Рассылки"), "AI/Рассылки")
+        self.assertEqual(self.fake.calls_of("MOVE"), [(b"1", f'"AI/{FOLDER}"')])
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "list" and c[2] == "*"]), 2)
+
+    def test_create_no_raises(self):
+        self.fake.fail_cmds = {"CREATE"}
+        b = self.box()
+        with self.assertRaises(RuntimeError):
+            b.apply(b"1", "Рассылки")
+        self.assertEqual(self.fake.calls_of("MOVE"), [])
+
+    def test_uidplus_partial_failure_recorded(self):
+        for cmd in ("STORE", "EXPUNGE"):
+            with self.subTest(cmd=cmd):
+                self.setUp()
+                self.fake.capabilities = ("UIDPLUS",)
+                self.fake.fail_cmds = {cmd}
+                b = self.box()
+                self.assertIsNone(b.apply(b"1", "Рассылки"))
+                self.assertEqual(len(self.fake.copied), 1)
+                self.assertIn(1, self.fake.messages)
+                self.assertEqual(len(b.warnings), 1)
+                self.assertIn("осталось во «Входящих»", b.warnings[0])
+                self.assertEqual(b.pending(10), [b"2"])
 
     def test_move_fallback_uidplus(self):
         self.fake.capabilities = ("UIDPLUS",)
@@ -237,6 +323,7 @@ class ImapBoxTest(unittest.TestCase):
         self.assertIsNone(b.apply(b"2", "Клиенты"))
         self.assertEqual(self.fake.calls_of("MOVE"), [])
         self.assertEqual(self.fake.created, [])
+        self.assertEqual([c for c in self.fake.calls if c[0] in ("create", "subscribe")], [])
         b.close()
         self.assertFalse(self.state_dir.exists())
 

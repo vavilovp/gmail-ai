@@ -16,6 +16,7 @@ MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 STATE_KEEP = 5000      # сколько последних обработанных писем помнить
 STATE_SAVE_EVERY = 10  # записывать учёт после каждых N писем
 HEADERS_ITEM = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
+UID_SET_MAX = 1000     # предельная длина набора UID в одной команде, байт
 
 
 def _today() -> date:
@@ -162,22 +163,51 @@ def _ok(resp, what: str):
     return data
 
 
+def uid_sets(uids: list, max_len: int = UID_SET_MAX) -> list:
+    """Наборы UID для команд: подряд идущие сворачиваются в диапазоны («1:40,42,57:90»),
+    каждый набор не длиннее max_len байт (серверы ограничивают длину командной строки)."""
+    nums = sorted({int(u) for u in uids})
+    pieces, i = [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        pieces.append(f"{nums[i]}:{nums[j]}" if j > i else str(nums[i]))
+        i = j + 1
+    sets, cur = [], ""
+    for p in pieces:
+        if cur and len(cur) + 1 + len(p) > max_len:
+            sets.append(cur.encode())
+            cur = ""
+        cur = f"{cur},{p}" if cur else p
+    if cur:
+        sets.append(cur.encode())
+    return sets
+
+
 def _fetch_parts(data):
-    """Пары (uid, литерал) из ответа UID FETCH; UID бывает и до литерала, и после него."""
+    """Пары (uid, содержимое) из ответа UID FETCH. Содержимое приходит литералом (UID до него
+    или после) либо строкой в кавычках / NIL — тогда весь ответ одной строкой."""
     waiting = None
     for item in data or []:
         if isinstance(item, tuple):
-            m = re.search(rb"UID (\d+)", item[0])
+            m = re.search(rb"\bUID (\d+)", item[0])
             if m:
                 waiting = None
                 yield m.group(1), item[1]
             else:
                 waiting = item[1]
-        elif isinstance(item, bytes) and waiting is not None:
-            m = re.search(rb"UID (\d+)", item)
-            if m:
-                yield m.group(1), waiting
-            waiting = None
+        elif isinstance(item, bytes):
+            m = re.search(rb"\bUID (\d+)", item)
+            if waiting is not None:
+                if m:
+                    yield m.group(1), waiting
+                waiting = None
+            elif m:
+                q = re.search(rb'BODY\[[^\]]*\] (NIL|"((?:[^"\\]|\\.)*)")', item)
+                if q:
+                    body = re.sub(rb"\\(.)", rb"\1", q.group(2)) if q.group(2) is not None else b""
+                    yield m.group(1), body
 
 
 def _list_delimiter(data) -> str:
@@ -259,7 +289,9 @@ class ImapBox(Mailbox):
         except FileNotFoundError:
             return
         except (OSError, ValueError, KeyError, TypeError) as e:
-            self.log(f"Файл учёта {self.state_path} повреждён ({e}), учёт начинается заново.")
+            msg = f"Файл учёта {self.state_path} повреждён ({e}), учёт начинается заново."
+            self.log(msg)
+            self.warnings.append(msg)
             return
         self.processed = keys[-STATE_KEEP:]
         self._seen = set(self.processed)
@@ -283,9 +315,11 @@ class ImapBox(Mailbox):
                 self.warnings.append(msg)
 
     def _fetch_keys(self, uids: list) -> dict:
-        data = _ok(self.imap.uid("FETCH", b",".join(uids), HEADERS_ITEM),
-                   "не удалось получить заголовки писем")
-        keys = {uid: mail_key(parse_message(head)) for uid, head in _fetch_parts(data)}
+        keys = {}
+        for uid_set in uid_sets(uids):
+            data = _ok(self.imap.uid("FETCH", uid_set, HEADERS_ITEM),
+                       "не удалось получить заголовки писем")
+            keys.update({uid: mail_key(parse_message(head)) for uid, head in _fetch_parts(data)})
         self._keys.update(keys)
         return keys
 
@@ -327,9 +361,8 @@ class ImapBox(Mailbox):
         folder = (self.acc.get("folders") or {}).get(category)
         moved = None
         if folder and self._can_move():
-            if not self.dry:
-                self._move(uid, folder)
-            moved = folder
+            if self.dry or self._move(uid, folder):
+                moved = folder
         if key not in self._seen:
             self._seen.add(key)
             self.processed.append(key)
@@ -362,22 +395,43 @@ class ImapBox(Mailbox):
         if name in self._folders:
             return
         typ, data = self.imap.create(_quote(name))
-        if typ != "OK" and "ALREADYEXISTS" not in str(data).upper():
-            raise RuntimeError(f"не удалось создать папку «{folder}»: {data}")
-        if typ == "OK":
-            self.log(f"Создана папка «{folder}»")
+        if typ != "OK":
+            # напр. «уже существует», хотя в LIST её не было: проверяем заново
+            typ2, data2 = self.imap.list()
+            if typ2 == "OK":
+                self._folders = _list_names(data2)
+            if name not in self._folders:
+                raise RuntimeError(f"не удалось создать папку «{folder}»: {data}")
+            return
+        self.log(f"Создана папка «{folder}»")
         self._folders.add(name)
+        # Outlook и Thunderbird показывают только папки, на которые есть подписка
+        try:
+            typ, data = self.imap.subscribe(_quote(name))
+        except imaplib.IMAP4.error as e:
+            typ, data = "NO", e
+        if typ != "OK":
+            self.log(f"Не удалось подписаться на папку «{folder}»: {data}")
 
-    def _move(self, uid: bytes, folder: str) -> None:
+    def _move(self, uid: bytes, folder: str) -> bool:
+        """Перенести письмо; True — оно убрано из «Входящих»."""
         name = self._server_name(folder)
         self._ensure_folder(name, folder)
         target, what = _quote(name), f"не удалось перенести письмо в «{folder}»"
         if "MOVE" in self._caps:
             _ok(self.imap.uid("MOVE", uid, target), what)
-        else:  # UIDPLUS: копия + удаление только этого письма; общий EXPUNGE не трогаем
-            _ok(self.imap.uid("COPY", uid, target), what)
-            _ok(self.imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)"), what)
-            _ok(self.imap.uid("EXPUNGE", uid), what)
+            return True
+        # UIDPLUS: копия + удаление только этого письма; общий EXPUNGE не трогаем
+        _ok(self.imap.uid("COPY", uid, target), what)
+        try:  # копия уже в папке: дальше письмо в любом случае считается обработанным
+            _ok(self.imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)"), "не удалось пометить на удаление")
+            _ok(self.imap.uid("EXPUNGE", uid), "не удалось удалить")
+        except (RuntimeError, imaplib.IMAP4.error) as e:
+            msg = f"Письмо скопировано в «{folder}», но осталось во «Входящих»: {e}"
+            self.log(msg)
+            self.warnings.append(msg)
+            return False
+        return True
 
     def close(self) -> None:
         if self._unsaved:

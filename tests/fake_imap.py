@@ -14,6 +14,9 @@ class FakeImap:
         self.login_ok = True
         self.fail_cmds = set()           # UID-команды, на которые сервер ответит NO
         self.uid_after_literal = False   # UID в ответе FETCH после литерала (как у части серверов)
+        self.quoted_empty = set()        # uid, чьи заголовки сервер отдаёт пустой строкой ""
+        self.guid = False                # добавлять в ответ FETCH поле «GUID <число>» перед UID
+        self.create_fail_exists = False  # при CREATE из fail_cmds папка всё же есть (гонка/регистр)
         # журнал и состояние
         self.calls = []                  # [("login", user, pwd), ("uid", "STORE", ...), ...]
         self.search_args = None
@@ -61,16 +64,30 @@ class FakeImap:
 
     def create(self, name):
         self.calls.append(("create", name))
+        if "CREATE" in self.fail_cmds:
+            if self.create_fail_exists:
+                self.folders.add(name.strip('"'))
+            return "NO", [b"Mailbox already exists"]
         self.folders.add(name.strip('"'))
         self.created.append(name)
         return "OK", [b"created"]
+
+    def subscribe(self, name):
+        self.calls.append(("subscribe", name))
+        if "SUBSCRIBE" in self.fail_cmds:
+            return "NO", [b"subscribe failed"]
+        return "OK", [b"subscribed"]
 
     # --- UID-команды ---
     @staticmethod
     def _uid_set(arg):
         if isinstance(arg, bytes):
             arg = arg.decode()
-        return [int(x) for x in str(arg).split(",")]
+        out = []
+        for part in str(arg).split(","):
+            a, _, b = part.partition(":")
+            out += range(int(a), int(b or a) + 1)
+        return out
 
     def _fetch(self, uids, items):
         m = re.search(r"HEADER\.FIELDS \(([^)]*)\)", items)
@@ -85,12 +102,15 @@ class FakeImap:
                 data = b"".join(l + b"\r\n" for l in head
                                 if l.split(b":", 1)[0].decode().upper() in wanted) + b"\r\n"
                 section = f"BODY[HEADER.FIELDS ({m.group(1)})]"
+                if u in self.quoted_empty:
+                    out.append(f'{u} (UID {u} {section} "")'.encode())
+                    continue
             else:
                 data, section = raw, "BODY[]"
             if self.uid_after_literal:
                 out += [(f"{u} ({section} {{{len(data)}}}".encode(), data), f" UID {u})".encode()]
                 continue
-            meta = f"{u} (UID {u}"
+            meta = f"{u} (" + (f"GUID {u + 1000} " if self.guid else "") + f"UID {u}"
             if u in self.gm_msgids:
                 meta += f" X-GM-MSGID {self.gm_msgids[u]}"
             meta += f" {section} {{{len(data)}}}"
