@@ -65,7 +65,7 @@ class ClassifyTest(unittest.TestCase):
 
 class DigestTest(unittest.TestCase):
     def test_digest_uses_account_prompt(self):
-        res = [{"archived": False, "category": "Работа", "importance": "высокая",
+        res = [{"moved": None, "category": "Работа", "importance": "высокая",
                 "needs_reply": True, "from": "a", "subject": "s", "summary": "z"}]
         with patch("mailai.llm.llm_call", return_value=" Сводка ") as m:
             out = llm.digest(SRV, make_acc(digest="МОЙ ПРОМПТ"), res)

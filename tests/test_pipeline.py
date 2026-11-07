@@ -145,6 +145,24 @@ class ProcessAccountTest(unittest.TestCase):
         self.assertEqual(saved, [mail_key(parse_message(raws[int(applied[0])]))])
         self.assertIn(("logout",), fake.calls)
 
+    def test_real_digest_gets_only_kept(self):
+        box = FakeBox([(b"1", "Архив"), (b"2", None)])
+        logs = []
+        with patch("gmail_ai.make_mailbox", lambda acc_, log, d: box),                 patch("gmail_ai.classify", lambda s, a, m: {**result(), "summary": "суть " + m["subject"]}),                 patch("mailai.llm.llm_call", return_value=" Итог ") as m:
+            res = gmail_ai.process_account(
+                SRV, acc(prompts={"digest": "П"}), False, None, logs.append)
+        self.assertEqual(res["summary"], "Итог")
+        prompt = m.call_args.args[1][1]["content"]
+        self.assertIn("тема 2", prompt)
+        self.assertNotIn("тема 1", prompt)
+
+    def test_digest_exception_does_not_abort(self):
+        box = FakeBox([(b"1", None)])
+        with patch("gmail_ai.make_mailbox", lambda acc_, log, d: box),                 patch("gmail_ai.classify", lambda s, a, m: result()),                 patch("gmail_ai.digest", side_effect=KeyError("x")):
+            res = gmail_ai.process_account(SRV, acc(), False, None, lambda m: None)
+        self.assertIn("не удалось составить сводку", res["summary"])
+        self.assertEqual(len(res["results"]), 1)
+
     def test_log_prefix(self):
         seen = []
 
@@ -197,6 +215,17 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(total, "A: ошибка · B: 1 (ждут ответа 0)")
         self.assertIn("Не вошли", self.texts[0])
         self.assertIn("id='acc-2'", self.texts[0])
+
+    def test_digest_failure_continues_to_next_mailbox(self):
+        accounts = [acc("A"), acc("B", "imap")]
+        boxes = {"A": FakeBox([(b"1", None)]), "B": FakeBox([(b"2", None)])}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with patch("gmail_ai.load_config",
+                   lambda: {"llm_server": {}, "accounts": accounts}),                 patch("gmail_ai.make_mailbox", lambda a, log, d: boxes[a["name"]]),                 patch("gmail_ai.server_ready", lambda s: True),                 patch("gmail_ai.classify", lambda s, a, m: result()),                 patch("mailai.llm.llm_call", side_effect=RuntimeError("упал")),                 patch("gmail_ai.REPORTS_DIR", Path(tmp.name)),                 patch("gmail_ai.webbrowser.open"):
+            total = gmail_ai.pipeline(Namespace(dry_run=False, limit=None), lambda m: None)
+        self.assertEqual(total, "A: 1 (ждут ответа 0) · B: 1 (ждут ответа 0)")
+        self.assertEqual(boxes["B"].closed, 1)
 
     def test_no_mail_no_report(self):
         total, wb, _, _ = self.run_pipeline([FakeBox([])], [acc("A")])

@@ -230,7 +230,7 @@ def classify(srv: dict, acc: dict, mail: dict) -> dict:
 
 
 def digest(srv: dict, acc: dict, results: list) -> str:
-    items = [r for r in results if not r["archived"]]
+    items = [r for r in results if r.get("moved") is None]
     if not items:
         return ""
     lines = "\n".join(

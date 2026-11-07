@@ -75,15 +75,21 @@ def process_account(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) ->
                     errors.append(msg)
                     alog("ОШИБКА: " + msg)
     finally:
+        address, moved_title = box.address, box.moved_title
         box.close()
 
     summary = ""
-    if any(r["moved"] is None for r in results):
+    kept = [r for r in results if r["moved"] is None]
+    if kept:
         check_cancel(cancel)
         alog("Составляю сводку…")
-        summary = digest(srv, acc, results)
-    return {"name": name, "type": acc["type"], "address": box.address,
-            "moved_title": box.moved_title, "results": results, "summary": summary,
+        try:
+            summary = digest(srv, acc, kept)
+        except Exception as e:
+            summary = f"(не удалось составить сводку: {e})"
+            alog("ОШИБКА: " + summary)
+    return {"name": name, "type": acc["type"], "address": address,
+            "moved_title": moved_title, "results": results, "summary": summary,
             "errors": errors, "warnings": list(box.warnings), "fatal": fatal}
 
 
