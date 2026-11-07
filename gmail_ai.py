@@ -22,7 +22,6 @@
 import argparse
 import html
 import imaplib
-import json
 import re
 import sys
 import time
@@ -30,52 +29,14 @@ import urllib.parse
 import webbrowser
 from datetime import datetime
 
-from mailai.common import (CONFIG_PATH, REPORTS_DIR, Stop, check_cancel, imap_utf7,
+from mailai.common import (REPORTS_DIR, Stop, check_cancel, imap_utf7,
                            make_logger, parse_message)
 from mailai.gui import ask_dialog, dpi_aware, run_gui
-from mailai.llm import (DEFAULT_PROMPTS, DEFAULT_SERVER, IMPORTANCE, classify, digest,
-                        prompt_text, server_ready, start_server, stop_server)
+from mailai.config import load_config
+from mailai.llm import IMPORTANCE, classify, digest, server_ready, start_server, stop_server
 
 if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-
-# ---------- конфиг ----------
-
-def load_config() -> dict:
-    if not CONFIG_PATH.exists():
-        raise Stop(f"Не найден {CONFIG_PATH}.\nСкопируйте config.example.json в config.json и заполните его.")
-    try:
-        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError as e:
-        raise Stop(f"Ошибка в config.json (строка {e.lineno}): {e.msg}")
-    if "your.address" in cfg.get("email", "") or "xxxx" in cfg.get("app_password", ""):
-        raise Stop("Заполните email и app_password в config.json.")
-    cfg["llm_server"] = {**DEFAULT_SERVER, **cfg.get("llm_server", {})}
-    cfg["prompts"] = {**DEFAULT_PROMPTS, **cfg.get("prompts", {})}
-    for key in ("classify", "digest"):
-        if not prompt_text(cfg["prompts"][key]):
-            raise Stop(f"Пустой промпт prompts.{key} в config.json.")
-    rules = cfg["prompts"]["rules"]
-    if isinstance(rules, str):
-        rules = [rules]
-    cfg["prompts"]["rules"] = [str(r).strip() for r in rules if str(r).strip()]
-
-    cats = cfg.get("categories")
-    if not isinstance(cats, dict) or not cats:
-        raise Stop("В config.json нет списка categories (категория: описание).")
-    for name in cats:
-        if not name.strip() or any(c in name for c in '"\\'):
-            raise Stop(f"Недопустимое имя категории: «{name}» (нельзя пустое, кавычки и \\).")
-    fallback = cfg.get("fallback_category") or list(cats)[-1]
-    if fallback not in cats:
-        raise Stop(f"fallback_category «{fallback}» нет среди categories.")
-    cfg["fallback_category"] = fallback
-    unknown = [c for c in cfg.get("archive_categories", []) if c not in cats]
-    if unknown:
-        raise Stop("В archive_categories есть категории, которых нет в categories: "
-                   + ", ".join(unknown))
-    return cfg
 
 
 # ---------- Gmail ----------
@@ -185,7 +146,7 @@ a{{color:#1a55a8;text-decoration:none}}
 
 # ---------- разбор почты ----------
 
-def process_mail(cfg: dict, dry: bool, limit, log, cancel=None):
+def process_mail(srv: dict, cfg: dict, dry: bool, limit, log, cancel=None, suffix=""):
     """Возвращает (путь к отчёту или None, текст итога)."""
     limit = limit or cfg.get("max_emails", 50)
     log("Подключаюсь к Gmail…")
@@ -209,7 +170,7 @@ def process_mail(cfg: dict, dry: bool, limit, log, cancel=None):
             try:
                 mail = fetch_mail(imap, uid, cfg["email"])
                 t0 = time.time()
-                res = classify(cfg["llm_server"], cfg, mail)
+                res = classify(srv, cfg, mail)
                 to_archive = res["category"] in archive_cats
                 if not dry:
                     store_labels(imap, uid, [prefix + res["category"], done_label])
@@ -231,9 +192,9 @@ def process_mail(cfg: dict, dry: bool, limit, log, cancel=None):
 
     check_cancel(cancel)
     log("Составляю сводку…")
-    summary = digest(cfg["llm_server"], cfg, results)
+    summary = digest(srv, cfg, results)
     REPORTS_DIR.mkdir(exist_ok=True)
-    path = REPORTS_DIR / f"mail_{datetime.now():%Y-%m-%d_%H-%M}{'_test' if dry else ''}.html"
+    path = REPORTS_DIR / f"mail_{datetime.now():%Y-%m-%d_%H-%M}{'_test' if dry else ''}{suffix}.html"
     path.write_text(build_report(results, summary, dry, errors), encoding="utf-8")
     reply = sum(r["needs_reply"] and not r["archived"] for r in results)
     arch = sum(r["archived"] for r in results)
@@ -256,8 +217,18 @@ def pipeline(args, log, cancel=None):
         else:
             proc = start_server(cfg["llm_server"], log, cancel)
         check_cancel(cancel)
-        _, total = process_mail(cfg, args.dry_run, args.limit, log, cancel)
-        return total
+        gmail = [a for a in cfg["accounts"] if a["type"] == "gmail"]
+        totals = []
+        for n, acc in enumerate(cfg["accounts"], 1):
+            if acc["type"] != "gmail":
+                log(f"Ящик «{acc['name']}» пропущен: IMAP появится позже.")
+                continue
+            check_cancel(cancel)
+            suffix = f"_{n}" if len(gmail) > 1 else ""
+            _, total = process_mail(cfg["llm_server"], acc, args.dry_run, args.limit,
+                                    log, cancel, suffix)
+            totals.append(f"{acc['name']}: {total}" if len(gmail) > 1 else total)
+        return chr(10).join(totals) or "Нет ящиков Gmail для разбора."
     finally:
         if proc is not None and cfg["llm_server"].get("stop_after", True):
             stop_server(proc, log)
