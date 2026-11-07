@@ -4,6 +4,7 @@ import imaplib
 import json
 import os
 import re
+import ssl
 import time
 import urllib.parse
 from datetime import date, timedelta
@@ -12,6 +13,7 @@ from pathlib import Path
 from mailai.common import STATE_DIR, Stop, imap_utf7, parse_message
 
 IMAP_SSL = imaplib.IMAP4_SSL  # тесты подменяют
+IMAP_TIMEOUT = 60      # с: без него зависший сервер держит разбор бесконечно
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 STATE_KEEP = 5000      # сколько последних обработанных писем помнить
 STATE_SAVE_EVERY = 10  # записывать учёт после каждых N писем
@@ -52,6 +54,13 @@ def _unquote(s: str) -> str:
     return s
 
 
+def _ok(resp, what: str):
+    typ, data = resp
+    if typ != "OK":
+        raise RuntimeError(f"{what}: {data}")
+    return data
+
+
 class Mailbox:
     moved_title = ""
 
@@ -59,6 +68,27 @@ class Mailbox:
         self.acc, self.log, self.dry = acc, log, dry
         self.address = ""
         self.warnings: list = []
+
+    def _open(self, host: str, port: int, where: str, verify: bool = True, hint: str = ""):
+        """SSL-подключение с проверкой сертификата и тайм-аутом; при сбое сети — 3 попытки."""
+        ctx = ssl.create_default_context()  # системное хранилище сертификатов Windows
+        if not verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            self.log(f"Внимание: проверка сертификата отключена (verify_cert: false) — "
+                     f"соединение с {host} не защищено от подмены сервера.")
+        last = None
+        for attempt in range(1, 4):  # при входе в систему сеть может подняться не сразу
+            try:
+                return IMAP_SSL(host, port, ssl_context=ctx, timeout=IMAP_TIMEOUT)
+            except ssl.SSLCertVerificationError as e:
+                raise Stop(f"Ящик «{self.acc['name']}»: сертификат сервера не прошёл проверку "
+                           f"({getattr(e, 'verify_message', None) or e}).{hint}")
+            except OSError as e:
+                last = e
+                self.log(f"Нет связи с {where} ({e}), повтор через 20 с… [{attempt}/3]")
+                time.sleep(20)
+        raise Stop(f"Не удалось подключиться к {where}: {last}")
 
     def connect(self) -> None:
         raise NotImplementedError
@@ -87,17 +117,7 @@ class GmailBox(Mailbox):
         self.imap = None
 
     def connect(self) -> None:
-        last = None
-        for attempt in range(1, 4):  # при входе в систему сеть может подняться не сразу
-            try:
-                imap = IMAP_SSL("imap.gmail.com")
-                break
-            except OSError as e:
-                last = e
-                self.log(f"Нет связи с Gmail ({e}), повтор через 20 с… [{attempt}/3]")
-                time.sleep(20)
-        else:
-            raise Stop(f"Не удалось подключиться к Gmail: {last}")
+        imap = self._open("imap.gmail.com", 993, "Gmail")  # сертификат проверяется всегда
         self.imap = imap  # сразу: close() отключится, даже если вход не удался
         try:
             imap.login(self.acc["email"], self.acc["app_password"].replace(" ", ""))
@@ -107,8 +127,8 @@ class GmailBox(Mailbox):
 
     def pending(self, limit: int) -> list:
         query = self.acc.get("search", "in:inbox is:unread newer_than:7d -label:ai-processed")
-        typ, data = self.imap.uid("SEARCH", "X-GM-RAW", f'"{query}"')
-        uids = data[0].split() if typ == "OK" and data and data[0] else []
+        data = _ok(self.imap.uid("SEARCH", "X-GM-RAW", f'"{query}"'), "поиск писем не удался")
+        uids = data[0].split() if data and data[0] else []
         return uids[-limit:][::-1]  # самые новые, от новых к старым
 
     def fetch(self, uid: bytes) -> dict:
@@ -154,13 +174,6 @@ class GmailBox(Mailbox):
 
 def _b(uid) -> bytes:
     return uid if isinstance(uid, bytes) else str(uid).encode()
-
-
-def _ok(resp, what: str):
-    typ, data = resp
-    if typ != "OK":
-        raise RuntimeError(f"{what}: {data}")
-    return data
 
 
 def uid_sets(uids: list, max_len: int = UID_SET_MAX) -> list:
@@ -256,17 +269,9 @@ class ImapBox(Mailbox):
     def connect(self) -> None:
         self._load_state()
         host, port = self.acc["host"], self.acc.get("port", 993)
-        last = None
-        for attempt in range(1, 4):  # при входе в систему сеть может подняться не сразу
-            try:
-                imap = IMAP_SSL(host, port)
-                break
-            except OSError as e:
-                last = e
-                self.log(f"Нет связи с {host} ({e}), повтор через 20 с… [{attempt}/3]")
-                time.sleep(20)
-        else:
-            raise Stop(f"Не удалось подключиться к {host}: {last}")
+        imap = self._open(host, port, host, verify=self.acc.get("verify_cert", True),
+                          hint=" Если это корпоративный сервер с собственным сертификатом — "
+                               'добавьте "verify_cert": false в настройки ящика.')
         self.imap = imap  # сразу: close() отключится, даже если вход не удался
         try:
             imap.login(self.acc["username"], self.acc["password"])
@@ -335,8 +340,8 @@ class ImapBox(Mailbox):
         days = self.acc.get("days", 7)
         if days:
             crit.append("SINCE " + imap_date(_today() - timedelta(days=days)))
-        typ, data = self.imap.uid("SEARCH", " ".join(c for c in crit if c))
-        uids = sorted(data[0].split(), key=int) if typ == "OK" and data and data[0] else []
+        data = _ok(self.imap.uid("SEARCH", " ".join(c for c in crit if c)), "поиск писем не удался")
+        uids = sorted(data[0].split(), key=int) if data and data[0] else []
         if not uids or limit <= 0:
             return []
         keys = self._fetch_keys(uids)

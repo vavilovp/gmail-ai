@@ -57,6 +57,18 @@ class ConfigTest(unittest.TestCase):
         w = load({"categories": CATS, "accounts": [IMAP]})["accounts"][0]
         self.assertEqual((w["port"], w["inbox"], w["search"], w["days"], w["folders"]),
                          (993, "INBOX", "UNSEEN", 7, {}))
+        self.assertIs(w["verify_cert"], True)
+
+    def test_verify_cert(self):
+        cfg = load({"categories": CATS, "verify_cert": False,
+                    "accounts": [GMAIL, IMAP, {**IMAP, "name": "W2", "verify_cert": True}]})
+        g, w, w2 = cfg["accounts"]
+        self.assertNotIn("verify_cert", g)
+        self.assertIs(w["verify_cert"], False)
+        self.assertIs(w2["verify_cert"], True)
+        with self.assertRaises(Stop) as cm:
+            load({"categories": CATS, "accounts": [{**IMAP, "verify_cert": "false"}]})
+        self.assertIn("Ящик «W»: verify_cert должно быть", str(cm.exception))
 
     def test_type_specific_keys_not_inherited_across_types(self):
         cfg = load({"categories": {"A": "a", "B": "b"}, "search": "in:inbox is:unread",

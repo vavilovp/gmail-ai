@@ -1,5 +1,6 @@
 import json
 import locale
+import ssl
 import tempfile
 import unittest
 from datetime import date
@@ -363,6 +364,50 @@ class ImapBoxTest(unittest.TestCase):
                 b.connect()
         self.assertEqual(sl.call_count, 3)
         self.assertIn("Не удалось подключиться к mail.corp.ru", str(cm.exception))
+
+    def test_tls_verified_with_timeout(self):
+        seen = []
+
+        def factory(*a, **k):
+            seen.append((a, k))
+            return self.fake
+        with patch("mailai.mailboxes.IMAP_SSL", factory):
+            self.box(port=1993)
+        (args, kw), = seen
+        self.assertEqual(args, ("mail.corp.ru", 1993))
+        self.assertEqual(kw["timeout"], 60)
+        self.assertEqual(kw["ssl_context"].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(kw["ssl_context"].check_hostname)
+        self.assertFalse(any("сертификат" in m for m in self.logs))
+
+    def test_verify_cert_false(self):
+        seen = []
+        with patch("mailai.mailboxes.IMAP_SSL", lambda *a, **k: seen.append(k) or self.fake):
+            b = self.box(verify_cert=False)
+        self.assertEqual(seen[0]["ssl_context"].verify_mode, ssl.CERT_NONE)
+        self.assertFalse(seen[0]["ssl_context"].check_hostname)
+        self.assertTrue(any("проверка сертификата отключена" in m for m in self.logs))
+        self.assertEqual(b.warnings, [])
+
+    def test_cert_error_is_stop_with_hint(self):
+        def bad_cert(*a, **k):
+            raise ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate")
+        with patch("mailai.mailboxes.IMAP_SSL", bad_cert), patch("mailai.mailboxes.time.sleep") as sl:
+            b = ImapBox(acc(), self.logs.append, False, state_dir=self.state_dir)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+        msg = str(cm.exception)
+        self.assertIn("Ящик «Работа»: сертификат сервера не прошёл проверку (", msg)
+        self.assertIn("self-signed certificate", msg)
+        self.assertIn('добавьте "verify_cert": false в настройки ящика.', msg)
+        sl.assert_not_called()
+
+    def test_search_no_raises(self):
+        self.fake.fail_cmds = {"SEARCH"}
+        b = self.box()
+        with self.assertRaises(RuntimeError):
+            b.pending(10)
+        self.assertEqual(self.fake.calls_of("FETCH"), [])
 
     def test_make_mailbox_imap(self):
         self.assertIsInstance(make_mailbox(acc(), self.logs.append, False), ImapBox)

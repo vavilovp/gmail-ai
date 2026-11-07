@@ -12,13 +12,14 @@ GMAIL_DEFAULTS = {
     "processed_label": "AI/processed",
     "archive_categories": [],
 }
-IMAP_DEFAULTS = {"port": 993, "inbox": "INBOX", "search": "UNSEEN", "days": 7, "folders": {}}
+IMAP_DEFAULTS = {"port": 993, "inbox": "INBOX", "search": "UNSEEN", "days": 7, "folders": {},
+                 "verify_cert": True}
 TYPES = {"gmail": GMAIL_DEFAULTS, "imap": IMAP_DEFAULTS}
 NOT_INHERITED = ("llm_server", "accounts", "prompts")
 TYPE_KEYS = {
     "gmail": {"email", "app_password", "search", "label_prefix", "processed_label",
               "archive_categories"},
-    "imap": {"host", "port", "username", "password", "inbox", "days", "folders"},
+    "imap": {"host", "port", "username", "password", "inbox", "days", "folders", "verify_cert"},
 }
 
 
@@ -65,6 +66,8 @@ def _check_account(acc: dict, name: str):
     if unknown:
         fail("в archive_categories есть категории, которых нет в categories: " + ", ".join(unknown))
     if acc["type"] == "imap":
+        if not isinstance(acc["verify_cert"], bool):
+            fail("verify_cert должно быть true или false.")
         if not isinstance(acc["folders"], dict):
             fail("folders должно быть словарём «категория: папка».")
         unknown = [c for c in acc["folders"] if c not in cats]

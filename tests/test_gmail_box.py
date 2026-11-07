@@ -1,3 +1,4 @@
+import ssl
 import unittest
 from unittest.mock import patch
 
@@ -81,6 +82,42 @@ class GmailBoxTest(unittest.TestCase):
                 b.connect()
         self.assertEqual(sl.call_count, 3)
         self.assertIn("Не удалось подключиться к Gmail", str(cm.exception))
+
+    def test_tls_verified_with_timeout(self):
+        seen = []
+
+        def factory(*a, **k):
+            seen.append((a, k))
+            return self.fake
+        with patch("mailai.mailboxes.IMAP_SSL", factory):
+            self.box()
+        (args, kw), = seen
+        self.assertEqual(args[0], "imap.gmail.com")
+        self.assertEqual(kw["timeout"], 60)
+        self.assertEqual(kw["ssl_context"].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(kw["ssl_context"].check_hostname)
+
+    def test_tls_verified_even_if_verify_cert_false(self):
+        seen = []
+        with patch("mailai.mailboxes.IMAP_SSL", lambda *a, **k: seen.append(k) or self.fake):
+            self.box(verify_cert=False)
+        self.assertEqual(seen[0]["ssl_context"].verify_mode, ssl.CERT_REQUIRED)
+
+    def test_cert_error_is_stop_without_retry(self):
+        def bad_cert(*a, **k):
+            raise ssl.SSLCertVerificationError(1, "certificate verify failed")
+        with patch("mailai.mailboxes.IMAP_SSL", bad_cert), patch("mailai.mailboxes.time.sleep") as sl:
+            b = make_mailbox(acc(), self.logs.append, False)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+        self.assertIn("Ящик «Gmail»: сертификат сервера не прошёл проверку", str(cm.exception))
+        sl.assert_not_called()
+
+    def test_search_no_raises(self):
+        self.fake.fail_cmds = {"SEARCH"}
+        b = self.box()
+        with self.assertRaises(RuntimeError):
+            b.pending(10)
 
     def test_close_logs_out(self):
         b = self.box()

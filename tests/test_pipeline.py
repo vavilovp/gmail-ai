@@ -163,6 +163,31 @@ class ProcessAccountTest(unittest.TestCase):
         self.assertIn("не удалось составить сводку", res["summary"])
         self.assertEqual(len(res["results"]), 1)
 
+    def test_search_no_is_fatal_for_real_boxes(self):
+        imap_acc = acc(type="imap", host="mail.corp.ru", username="me@corp.ru", password="secret",
+                       inbox="INBOX", search="UNSEEN", days=7, folders={}, categories={"К": "y"})
+        gmail_acc = acc("Личный", email="me@gmail.com", app_password="abcd efgh")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for a in (gmail_acc, imap_acc):
+            with self.subTest(type=a["type"]):
+                fake = FakeImap()
+                fake.messages = {1: make_raw(message_id="<a@x>")}
+                fake.fail_cmds = {"SEARCH"}
+                real_make = gmail_ai.make_mailbox
+
+                def make(acc_, log, dry):
+                    if acc_["type"] == "imap":
+                        return ImapBox(acc_, log, dry, state_dir=Path(tmp.name))
+                    return real_make(acc_, log, dry)
+                with patch("mailai.mailboxes.IMAP_SSL", lambda *a_, **k: fake),                         patch("mailai.mailboxes._today", lambda: date(2026, 11, 7)),                         patch("gmail_ai.make_mailbox", make),                         patch("gmail_ai.classify") as cl:
+                    res = gmail_ai.process_account(SRV, a, False, None, lambda m: None)
+                self.assertIn("SEARCH", "".join(c[1] for c in fake.calls if c[0] == "uid"))
+                self.assertIsNotNone(res["fatal"])
+                self.assertEqual(res["results"], [])
+                cl.assert_not_called()
+                self.assertIn(("logout",), fake.calls)
+
     def test_log_prefix(self):
         seen = []
 
