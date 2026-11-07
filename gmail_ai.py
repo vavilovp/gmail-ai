@@ -30,7 +30,7 @@ from mailai.gui import ask_dialog, dpi_aware, run_gui
 from mailai.config import load_config
 from mailai.mailboxes import make_mailbox
 from mailai.report import build_report
-from mailai.llm import IMPORTANCE, classify, digest, server_ready, start_server, stop_server
+from mailai.llm import classify, digest, server_ready, start_server, stop_server
 
 if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -38,91 +38,89 @@ if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
 
 # ---------- разбор почты ----------
 
-def process_mail(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) -> dict:
-    """Разбирает один ящик, возвращает AccountResult (отчёт пишет вызывающий)."""
+def process_account(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) -> dict:
+    """Разбирает один ящик, возвращает AccountResult. Сбой подключения — в поле fatal."""
+    name = acc["name"]
+
+    def alog(msg):
+        log(f"[{name}] {msg}")
+
     limit = limit or acc.get("max_emails", 50)
-    log(f"Подключаюсь к ящику «{acc['name']}»…")
-    box = make_mailbox(acc, log, dry)
-    box.connect()
-    results, errors = [], []
+    alog(f"Подключаюсь к ящику «{name}»…")
+    box = make_mailbox(acc, alog, dry)
+    results, errors, fatal = [], [], None
     try:
-        uids = box.pending(limit)
-        log(f"Писем для разбора: {len(uids)}" + (" (тестовый режим)" if dry else ""))
-        for i, uid in enumerate(uids, 1):
-            check_cancel(cancel)
-            try:
-                mail = box.fetch(uid)
-                t0 = time.time()
-                res = classify(srv, acc, mail)
-                moved = box.apply(uid, res["category"])
-                results.append({**mail, **res, "moved": moved})
-                mark = f" → {moved}" if moved is not None else ""
-                log(f"[{i}/{len(uids)}] {res['category']}{mark} | {res['importance']} | "
-                    f"{mail['subject'][:60]}  ({time.time() - t0:.1f} с)")
-            except Exception as e:
-                msg = f"письмо uid {uid.decode()}: {e}"
-                errors.append(msg)
-                log("ОШИБКА: " + msg)
-        warnings = list(box.warnings)
-        moved_title = box.moved_title
-        address = box.address
+        try:
+            box.connect()
+            uids = box.pending(limit)
+        except Exception as e:
+            text = str(e) or type(e).__name__
+            fatal = text.splitlines()[0]
+            alog("ОШИБКА: " + text)
+        else:
+            alog(f"Писем для разбора: {len(uids)}" + (" (тестовый режим)" if dry else ""))
+            for i, uid in enumerate(uids, 1):
+                check_cancel(cancel)
+                try:
+                    mail = box.fetch(uid)
+                    t0 = time.time()
+                    res = classify(srv, acc, mail)
+                    moved = box.apply(uid, res["category"])
+                    results.append({**mail, **res, "moved": moved})
+                    mark = f" → {moved}" if moved is not None else ""
+                    alog(f"[{i}/{len(uids)}] {res['category']}{mark} | {res['importance']} | "
+                         f"{mail['subject'][:60]}  ({time.time() - t0:.1f} с)")
+                except Exception as e:
+                    msg = f"письмо uid {uid.decode()}: {e}"
+                    errors.append(msg)
+                    alog("ОШИБКА: " + msg)
     finally:
         box.close()
 
     summary = ""
-    if results:
+    if any(r["moved"] is None for r in results):
         check_cancel(cancel)
-        log("Составляю сводку…")
+        alog("Составляю сводку…")
         summary = digest(srv, acc, results)
-    return {"name": acc["name"], "type": acc["type"], "address": address,
-            "moved_title": moved_title, "results": results, "summary": summary,
-            "errors": errors, "warnings": warnings, "fatal": None}
+    return {"name": name, "type": acc["type"], "address": box.address,
+            "moved_title": box.moved_title, "results": results, "summary": summary,
+            "errors": errors, "warnings": list(box.warnings), "fatal": fatal}
 
 
-def account_total(a: dict, dry: bool) -> str:
-    res = a["results"]
-    if not res and not a["errors"]:
-        return "Новых писем нет."
-    reply = sum(r["needs_reply"] and r["moved"] is None for r in res)
-    arch = sum(r["moved"] is not None for r in res)
-    return (f"Разобрано писем: {len(res)}. Ждут ответа: {reply}. "
-            f"{'Ушло бы' if dry else 'Убрано'} в архив: {arch}."
-            + (f" Ошибок: {len(a['errors'])}." if a["errors"] else ""))
+def account_line(a: dict) -> str:
+    if a["fatal"]:
+        return f"{a['name']}: ошибка"
+    reply = sum(r["needs_reply"] and r["moved"] is None for r in a["results"])
+    return f"{a['name']}: {len(a['results'])} (ждут ответа {reply})"
 
 
 def pipeline(args, log, cancel=None):
-    """Полный цикл: модель → почта → выключение модели. Возвращает текст итога."""
+    """Полный цикл: модель → все ящики → отчёт → выключение модели. Возвращает текст итога."""
     cfg = load_config()
+    srv = cfg["llm_server"]
     proc = None
     try:
-        if server_ready(cfg["llm_server"]):
+        if server_ready(srv):
             log("Модель уже запущена — использую её (выключать не буду).")
         else:
-            proc = start_server(cfg["llm_server"], log, cancel)
-        check_cancel(cancel)
+            proc = start_server(srv, log, cancel)
         accounts = []
         for acc in cfg["accounts"]:
-            if acc["type"] != "gmail":
-                log(f"Ящик «{acc['name']}» пропущен: IMAP появится позже.")
-                continue
             check_cancel(cancel)
-            accounts.append(process_mail(cfg["llm_server"], acc, args.dry_run, args.limit,
-                                         log, cancel))
-        if not accounts:
-            return "Нет ящиков Gmail для разбора."
-        REPORTS_DIR.mkdir(exist_ok=True)
-        path = REPORTS_DIR / f"mail_{datetime.now():%Y-%m-%d_%H-%M}{'_test' if args.dry_run else ''}.html"
-        path.write_text(build_report(accounts, args.dry_run), encoding="utf-8")
-        log(f"Отчёт: {path}")
-        webbrowser.open(path.as_uri())
-        multi = len(accounts) > 1
-        totals = [f"{a['name']}: {account_total(a, args.dry_run)}" if multi
-                  else account_total(a, args.dry_run) for a in accounts]
-        total = chr(10).join(totals)
+            accounts.append(process_account(srv, acc, args.dry_run, args.limit, log, cancel))
+        if not any(a["results"] or a["errors"] or a["warnings"] or a["fatal"] for a in accounts):
+            total = "Новых писем нет."
+        else:
+            REPORTS_DIR.mkdir(exist_ok=True)
+            path = REPORTS_DIR / f"mail_{datetime.now():%Y-%m-%d_%H-%M}{'_test' if args.dry_run else ''}.html"
+            path.write_text(build_report(accounts, args.dry_run), encoding="utf-8")
+            log(f"Отчёт: {path}")
+            webbrowser.open(path.as_uri())
+            total = " · ".join(account_line(a) for a in accounts)
         log(total)
         return total
     finally:
-        if proc is not None and cfg["llm_server"].get("stop_after", True):
+        if proc is not None and srv.get("stop_after", True):
             stop_server(proc, log)
 
 

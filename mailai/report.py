@@ -55,7 +55,7 @@ def _section(n: int, a: dict, dry: bool) -> str:
         return head + f"<p class='fatal'>{esc(a['fatal'])}</p>"
     results = a["results"]
     if not results:
-        body = "<p class='empty'>Новых писем нет</p>"
+        body = "" if a.get("errors") else "<p class='empty'>Новых писем нет</p>"
     else:
         imap = a["type"] == "imap"
         moved = [r for r in results if r.get("moved") is not None]
@@ -78,8 +78,9 @@ def _section(n: int, a: dict, dry: bool) -> str:
         _list("Ошибки", a.get("errors") or [])
 
 
-def _overview(accounts: list) -> str:
-    out = ["<table><tr><th>Ящик</th><th>Писем</th><th>Ждут ответа</th><th>Убрано из «Входящих»</th><th>Состояние</th></tr>"]
+def _overview(accounts: list, dry: bool) -> str:
+    gone = "Ушло бы" if dry else "Убрано"
+    out = [f"<table><tr><th>Ящик</th><th>Писем</th><th>Ждут ответа</th><th>{gone} из «Входящих»</th><th>Состояние</th></tr>"]
     for n, a in enumerate(accounts, 1):
         link = f"<a href='#acc-{n}'>{esc(a['name'])}</a>"
         if a.get("fatal"):
@@ -106,6 +107,6 @@ def build_report(accounts: list, dry: bool) -> str:
 {CSS}
 </style></head><body>
 <h1>Почта: {total} новых писем — {now:%d.%m.%Y %H:%M}</h1>
-{mode}{_overview(accounts)}
+{mode}{_overview(accounts, dry)}
 {sections}
 </body></html>"""

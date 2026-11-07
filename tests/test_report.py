@@ -80,12 +80,14 @@ class ReportTest(unittest.TestCase):
         self.assertIn("Х (Gmail)", out)
         self.assertNotIn("· )", out)
 
-    def test_account_total_with_only_errors(self):
-        from gmail_ai import account_total
-        t = account_total(acc(results=[], errors=["e1", "e2"]), False)
-        self.assertIn("Разобрано писем: 0", t)
-        self.assertIn("Ошибок: 2", t)
-        self.assertEqual(account_total(acc(results=[]), False), "Новых писем нет.")
+    def test_errors_only_section_not_empty(self):
+        out = build_report([acc(results=[], errors=["письмо 5: сбой"])], False)
+        self.assertNotIn("Новых писем нет", out)
+        self.assertIn("письмо 5: сбой", out)
+
+    def test_overview_header_dry(self):
+        self.assertIn("Ушло бы из «Входящих»", build_report([acc()], True))
+        self.assertNotIn("Убрано из «Входящих»", build_report([acc()], True))
 
 
 if __name__ == "__main__":
