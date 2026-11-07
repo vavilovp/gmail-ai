@@ -45,7 +45,8 @@ def _list(title: str, items: list) -> str:
 
 def _heading(a: dict) -> str:
     kind = "IMAP" if a["type"] == "imap" else "Gmail"
-    return f"{esc(a['name'])} ({kind} · {esc(a['address'])})"
+    addr = f" · {esc(a['address'])}" if a.get("address") else ""
+    return f"{esc(a['name'])} ({kind}{addr})"
 
 
 def _section(n: int, a: dict, dry: bool) -> str:
@@ -78,16 +79,17 @@ def _section(n: int, a: dict, dry: bool) -> str:
 
 
 def _overview(accounts: list) -> str:
-    out = ["<table><tr><th>Ящик</th><th>Писем</th><th>Ждут ответа</th><th>Состояние</th></tr>"]
+    out = ["<table><tr><th>Ящик</th><th>Писем</th><th>Ждут ответа</th><th>Убрано из «Входящих»</th><th>Состояние</th></tr>"]
     for n, a in enumerate(accounts, 1):
         link = f"<a href='#acc-{n}'>{esc(a['name'])}</a>"
         if a.get("fatal"):
-            out.append(f"<tr><td>{link}</td><td>—</td><td>—</td><td>{esc(a['fatal'])}</td></tr>")
+            out.append(f"<tr><td>{link}</td><td>—</td><td>—</td><td>—</td><td>{esc(a['fatal'])}</td></tr>")
             continue
         res = a["results"]
         reply = sum(1 for r in res if r["needs_reply"] and r.get("moved") is None)
+        moved = sum(1 for r in res if r.get("moved") is not None)
         state = f"Ошибок: {len(a['errors'])}" if a.get("errors") else "ОК"
-        out.append(f"<tr><td>{link}</td><td>{len(res)}</td><td>{reply}</td><td>{state}</td></tr>")
+        out.append(f"<tr><td>{link}</td><td>{len(res)}</td><td>{reply}</td><td>{moved}</td><td>{state}</td></tr>")
     out.append("</table>")
     return "\n".join(out)
 

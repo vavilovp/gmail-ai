@@ -81,7 +81,7 @@ def process_mail(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) -> di
 
 def account_total(a: dict, dry: bool) -> str:
     res = a["results"]
-    if not res:
+    if not res and not a["errors"]:
         return "Новых писем нет."
     reply = sum(r["needs_reply"] and r["moved"] is None for r in res)
     arch = sum(r["moved"] is not None for r in res)

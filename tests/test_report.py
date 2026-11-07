@@ -67,6 +67,26 @@ class ReportTest(unittest.TestCase):
         self.assertIn("<a href='http://l/1'", out)
         self.assertEqual(out.count("<a href='http://l"), 1)
 
+    def test_overview_moved_count(self):
+        a = acc("Первый", results=[mail(moved="архив"), mail(moved="архив"), mail()])
+        b = acc("Второй", results=[mail()])
+        out = build_report([a, b], False)
+        self.assertIn("Убрано из «Входящих»", out)
+        self.assertIn("<td>3</td><td>0</td><td>2</td>", out)
+        self.assertIn("<td>1</td><td>0</td><td>0</td>", out)
+
+    def test_empty_address(self):
+        out = build_report([acc("Х", address="")], False)
+        self.assertIn("Х (Gmail)", out)
+        self.assertNotIn("· )", out)
+
+    def test_account_total_with_only_errors(self):
+        from gmail_ai import account_total
+        t = account_total(acc(results=[], errors=["e1", "e2"]), False)
+        self.assertIn("Разобрано писем: 0", t)
+        self.assertIn("Ошибок: 2", t)
+        self.assertEqual(account_total(acc(results=[]), False), "Новых писем нет.")
+
 
 if __name__ == "__main__":
     unittest.main()
