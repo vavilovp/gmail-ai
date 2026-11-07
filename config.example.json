@@ -1,7 +1,4 @@
 {
-  "email": "your.address@gmail.com",
-  "app_password": "xxxx xxxx xxxx xxxx",
-
   "llm_server": {
     "exe": "C:\\llama\\llama-server.exe",
     "model": "C:\\llama\\models\\Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
@@ -16,11 +13,8 @@
     "stop_after": true
   },
 
-  "search": "in:inbox is:unread newer_than:7d -label:ai-processed",
   "max_emails": 50,
 
-  "label_prefix": "AI/",
-  "processed_label": "AI/processed",
   "archive_categories": ["Реклама"],
   "fallback_category": "Прочее",
 
@@ -52,5 +46,41 @@
     "digest": [
       "Ты помощник. По списку новых писем напиши короткую сводку по-русски: 3–7 пунктов, начиная с самого важного и срочного. Не выдумывай того, чего нет в списке. Без вступлений."
     ]
-  }
+  },
+
+  "accounts": [
+    {
+      "name": "Личный Gmail",
+      "type": "gmail",
+      "email": "your.address@gmail.com",
+      "app_password": "xxxx xxxx xxxx xxxx"
+    },
+    {
+      "name": "Работа",
+      "type": "imap",
+      "host": "mail.company.ru",
+      "port": 993,
+      "username": "your.address@company.ru",
+      "password": "xxxx",
+      "inbox": "INBOX",
+      "search": "UNSEEN",
+      "days": 7,
+
+      "categories": {
+        "Клиенты": "письма от клиентов и заказчиков, вопросы по проектам и договорам",
+        "Внутреннее": "переписка коллег, объявления компании, внутренние сервисы",
+        "Рассылки": "новостные рассылки и дайджесты, на которые подписан сотрудник",
+        "Уведомления": "автоматические уведомления систем и сервисов",
+        "Прочее": "всё, что не подходит под другие категории"
+      },
+      "fallback_category": "Прочее",
+      "folders": { "Рассылки": "AI/Рассылки" },
+
+      "prompts": {
+        "rules": [
+          "Письма с адресов @company.ru — «Внутреннее»."
+        ]
+      }
+    }
+  ]
 }
