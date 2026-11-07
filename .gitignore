@@ -1,0 +1,19 @@
+# Личные настройки: email и пароль приложения Gmail
+config.json
+
+# Результаты работы
+logs/
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Редакторы и ОС
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
