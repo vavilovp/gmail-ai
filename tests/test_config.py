@@ -119,6 +119,65 @@ class ConfigTest(unittest.TestCase):
         bad({"categories": {'Ра"бота': "x"}, "accounts": [GMAIL]}, "Ра")
         bad({**base, "accounts": [{**GMAIL, "fallback_category": "Нет"}]}, "G", "Нет")
 
+    def test_inherited_fallback_and_archive_fit_account_categories(self):
+        own = {"Работа": "р", "Прочее": "п", "Личное": "л"}
+        cfg = load({"categories": CATS, "fallback_category": "Реклама", "archive_categories": ["Реклама"],
+                    "accounts": [GMAIL,
+                                 {**GMAIL, "name": "G2", "categories": own},
+                                 {**IMAP, "categories": {"X": "x", "Y": "y"}}]})
+        g, g2, w = cfg["accounts"]
+        self.assertEqual((g["fallback_category"], g["archive_categories"]), ("Реклама", ["Реклама"]))
+        self.assertEqual((g2["fallback_category"], g2["archive_categories"]), ("Личное", []))
+        self.assertEqual(w["fallback_category"], "Y")
+
+    def test_inherited_archive_filtered(self):
+        g = load({"categories": CATS, "archive_categories": ["Реклама", "Нет"],
+                  "accounts": [GMAIL]})["accounts"][0]
+        self.assertEqual(g["archive_categories"], ["Реклама"])
+
+    def test_own_fallback_and_archive_strict(self):
+        own = {"Работа": "р", "Прочее": "п"}
+        for bad_key, val in (("fallback_category", "Реклама"), ("archive_categories", ["Реклама"])):
+            with self.subTest(key=bad_key), self.assertRaises(Stop) as cm:
+                load({"categories": CATS, "accounts": [{**GMAIL, "categories": own, bad_key: val}]})
+            self.assertIn("Реклама", str(cm.exception))
+
+    def test_field_types(self):
+        cases = [
+            ({**GMAIL, "email": 123}, "email должно быть строкой"),
+            ({**GMAIL, "app_password": ["abcd"]}, "app_password должно быть строкой"),
+            ({**GMAIL, "search": 7}, "search должно быть строкой"),
+            ({**IMAP, "password": 1234}, "password должно быть строкой"),
+            ({**IMAP, "username": 5}, "username должно быть строкой"),
+            ({**IMAP, "host": ["mail.c.ru"]}, "host должно быть строкой"),
+            ({**IMAP, "inbox": None}, "inbox должно быть строкой"),
+            ({**IMAP, "search": False}, "search должно быть строкой"),
+            ({**IMAP, "port": "993"}, "port должно быть целым неотрицательным числом"),
+            ({**IMAP, "port": True}, "port должно быть целым неотрицательным числом"),
+            ({**IMAP, "days": -1}, "days должно быть целым неотрицательным числом"),
+            ({**IMAP, "days": 1.5}, "days должно быть целым неотрицательным числом"),
+            ({**GMAIL, "max_emails": "50"}, "max_emails должно быть целым неотрицательным числом"),
+        ]
+        for a, needle in cases:
+            with self.subTest(needle=needle):
+                with self.assertRaises(Stop) as cm:
+                    load({"categories": CATS, "accounts": [a]})
+                self.assertIn(f"Ящик «{a['name']}»: {needle}", str(cm.exception))
+        with self.assertRaises(Stop) as cm:
+            load({"categories": CATS, "max_emails": False, "accounts": [IMAP]})
+        self.assertIn("Ящик «W»: max_emails должно быть", str(cm.exception))
+        w = load({"categories": CATS, "max_emails": 0, "accounts": [{**IMAP, "days": 0}]})["accounts"][0]
+        self.assertEqual((w["max_emails"], w["days"]), (0, 0))
+
+    def test_names_unique_as_file_names(self):
+        for first, second in (("Работа", "работа"), ("a/b", "A_b"), ("Почта.", "почта")):
+            with self.subTest(names=(first, second)):
+                with self.assertRaises(Stop) as cm:
+                    load({"categories": CATS,
+                          "accounts": [{**GMAIL, "name": first}, {**IMAP, "name": second}]})
+                self.assertIn(f"«{first}»", str(cm.exception))
+                self.assertIn(f"«{second}»", str(cm.exception))
+
     def test_example_config_loads(self):
         text = (Path(__file__).resolve().parent.parent / "config.example.json").read_text(encoding="utf-8")
         text = text.replace("your.address", "me").replace("xxxx", "abcd")

@@ -113,6 +113,9 @@ class GmailBoxTest(unittest.TestCase):
         self.assertIn("Ящик «Gmail»: сертификат сервера не прошёл проверку", str(cm.exception))
         sl.assert_not_called()
 
+    def test_pending_zero_limit(self):
+        self.assertEqual(self.box().pending(0), [])
+
     def test_search_no_raises(self):
         self.fake.fail_cmds = {"SEARCH"}
         b = self.box()

@@ -32,6 +32,11 @@ def make_logger(gui_queue=None):
     return log
 
 
+def safe_name(name: str) -> str:
+    """Имя ящика, пригодное для имени файла в Windows."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(" .") or "_"
+
+
 def check_cancel(cancel):
     if cancel is not None and cancel.is_set():
         raise Stop("Отменено.")

@@ -10,7 +10,7 @@ import urllib.parse
 from datetime import date, timedelta
 from pathlib import Path
 
-from mailai.common import STATE_DIR, Stop, imap_utf7, parse_message
+from mailai.common import STATE_DIR, Stop, imap_utf7, parse_message, safe_name
 
 IMAP_SSL = imaplib.IMAP4_SSL  # тесты подменяют
 IMAP_TIMEOUT = 60      # с: без него зависший сервер держит разбор бесконечно
@@ -37,11 +37,6 @@ def mail_key(mail: dict) -> str:
         return mid
     src = mail.get("from", "") + mail.get("date", "") + mail.get("subject", "")
     return "sha1:" + hashlib.sha1(src.encode("utf-8")).hexdigest()
-
-
-def safe_name(name: str) -> str:
-    """Имя ящика, пригодное для имени файла в Windows."""
-    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(" .") or "_"
 
 
 def _quote(s: str) -> str:
@@ -126,6 +121,8 @@ class GmailBox(Mailbox):
         imap.select("INBOX", readonly=self.dry)
 
     def pending(self, limit: int) -> list:
+        if limit <= 0:
+            return []
         query = self.acc.get("search", "in:inbox is:unread newer_than:7d -label:ai-processed")
         data = _ok(self.imap.uid("SEARCH", "X-GM-RAW", f'"{query}"'), "поиск писем не удался")
         uids = data[0].split() if data and data[0] else []
