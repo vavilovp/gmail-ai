@@ -21,70 +21,19 @@
 """
 import argparse
 import html
-import imaplib
-import re
 import sys
 import time
-import urllib.parse
 import webbrowser
 from datetime import datetime
 
-from mailai.common import (REPORTS_DIR, Stop, check_cancel, imap_utf7,
-                           make_logger, parse_message)
+from mailai.common import REPORTS_DIR, Stop, check_cancel, make_logger
 from mailai.gui import ask_dialog, dpi_aware, run_gui
 from mailai.config import load_config
+from mailai.mailboxes import make_mailbox
 from mailai.llm import IMPORTANCE, classify, digest, server_ready, start_server, stop_server
 
 if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-
-# ---------- Gmail ----------
-
-def gmail_connect(cfg: dict, log, dry: bool):
-    last = None
-    for attempt in range(1, 4):  # при входе в систему сеть может подняться не сразу
-        try:
-            imap = imaplib.IMAP4_SSL("imap.gmail.com")
-            break
-        except OSError as e:
-            last = e
-            log(f"Нет связи с Gmail ({e}), повтор через 20 с… [{attempt}/3]")
-            time.sleep(20)
-    else:
-        raise Stop(f"Не удалось подключиться к Gmail: {last}")
-    try:
-        imap.login(cfg["email"], cfg["app_password"].replace(" ", ""))
-    except imaplib.IMAP4.error as e:
-        raise Stop(f"Gmail не пустил: {e}\nПроверьте адрес и пароль приложения в config.json.")
-    imap.select("INBOX", readonly=dry)
-    return imap
-
-
-def store_labels(imap, uid: bytes, labels: list):
-    arg = "(" + " ".join('"' + imap_utf7(l) + '"' for l in labels) + ")"
-    typ, data = imap.uid("STORE", uid, "+X-GM-LABELS", arg)
-    if typ != "OK":
-        raise RuntimeError(f"не удалось поставить ярлык: {data}")
-
-
-def archive(imap, uid: bytes):
-    typ, data = imap.uid("STORE", uid, "-X-GM-LABELS", "(\\Inbox)")
-    if typ != "OK":
-        raise RuntimeError(f"не удалось архивировать: {data}")
-
-
-def fetch_mail(imap, uid: bytes, account: str) -> dict:
-    typ, data = imap.uid("FETCH", uid, "(X-GM-MSGID BODY.PEEK[])")
-    if typ != "OK" or not data or not isinstance(data[0], tuple):
-        raise RuntimeError("не удалось получить письмо")
-    meta, raw = data[0][0], data[0][1]
-    m = re.search(rb"X-GM-MSGID (\d+)", meta)
-    mail = parse_message(raw)
-    # /u/<адрес>/ — открывает письмо именно в этом аккаунте, даже если в браузере их несколько
-    mail["link"] = (f"https://mail.google.com/mail/u/{urllib.parse.quote(account)}/#all/{int(m.group(1)):x}"
-                    if m else "")
-    return mail
 
 
 # ---------- отчёт ----------
@@ -150,32 +99,23 @@ def process_mail(srv: dict, cfg: dict, dry: bool, limit, log, cancel=None, suffi
     """Возвращает (путь к отчёту или None, текст итога)."""
     limit = limit or cfg.get("max_emails", 50)
     log("Подключаюсь к Gmail…")
-    imap = gmail_connect(cfg, log, dry)
+    box = make_mailbox(cfg, log, dry)
+    box.connect()
     try:
-        query = cfg.get("search", "in:inbox is:unread newer_than:7d -label:ai-processed")
-        typ, data = imap.uid("SEARCH", "X-GM-RAW", f'"{query}"')
-        uids = data[0].split() if typ == "OK" and data and data[0] else []
-        uids = uids[-limit:][::-1]  # самые новые, от новых к старым
+        uids = box.pending(limit)
         log(f"Писем для разбора: {len(uids)}" + (" (тестовый режим)" if dry else ""))
         if not uids:
             return None, "Новых писем нет."
 
         results, errors = [], []
-        prefix = cfg.get("label_prefix", "AI/")
-        done_label = cfg.get("processed_label", "AI/processed")
-        archive_cats = set(cfg.get("archive_categories", []))
-
         for i, uid in enumerate(uids, 1):
             check_cancel(cancel)
             try:
-                mail = fetch_mail(imap, uid, cfg["email"])
+                mail = box.fetch(uid)
                 t0 = time.time()
                 res = classify(srv, cfg, mail)
-                to_archive = res["category"] in archive_cats
-                if not dry:
-                    store_labels(imap, uid, [prefix + res["category"], done_label])
-                    if to_archive:
-                        archive(imap, uid)
+                moved = box.apply(uid, res["category"])
+                to_archive = moved is not None
                 results.append({**mail, **res, "archived": to_archive})
                 mark = " → архив" if to_archive else ""
                 log(f"[{i}/{len(uids)}] {res['category']}{mark} | {res['importance']} | "
@@ -185,10 +125,7 @@ def process_mail(srv: dict, cfg: dict, dry: bool, limit, log, cancel=None, suffi
                 errors.append(msg)
                 log("ОШИБКА: " + msg)
     finally:
-        try:
-            imap.logout()
-        except Exception:
-            pass
+        box.close()
 
     check_cancel(cancel)
     log("Составляю сводку…")
