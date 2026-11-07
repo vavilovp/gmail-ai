@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
@@ -60,6 +61,30 @@ DEFAULT_SERVER = {
     "startup_timeout_sec": 300,
     "stop_after": True,
 }
+
+# Промпты по умолчанию (переопределяются блоком "prompts" в config.json).
+# Текст можно писать строкой или списком строк — строки склеиваются через перевод строки.
+# В "classify" подстановка {categories} заменяется списком категорий из config.json.
+DEFAULT_PROMPTS = {
+    "classify": [
+        "Ты помощник, который разбирает входящую почту пользователя. Для письма определи:",
+        "category — ровно одна категория из списка:",
+        "{categories}",
+        "importance — «высокая» (нужно внимание скоро: деньги, сроки, безопасность аккаунта, "
+        "личное письмо от реального человека, рабочий вопрос), «средняя» или «низкая» "
+        "(массовые рассылки, реклама, рядовые автоуведомления).",
+        "needs_reply — true, только если реальный человек ждёт ответа именно от пользователя.",
+        "summary — одно короткое предложение по-русски: суть письма и что нужно сделать, если нужно.",
+        "Отвечай только JSON.",
+    ],
+    "rules": [],
+    "digest": [
+        "Ты помощник. По списку новых писем напиши короткую сводку по-русски: "
+        "3–7 пунктов, начиная с самого важного и срочного. Не выдумывай того, чего нет в списке. "
+        "Без вступлений.",
+    ],
+}
+CLASSIFY_MAX_TOKENS = 800
 
 if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -127,6 +152,13 @@ def get_body(msg) -> str:
     return text.strip()[:MAX_BODY_CHARS]
 
 
+def prompt_text(p) -> str:
+    """Промпт из config.json: строка или список строк."""
+    if isinstance(p, (list, tuple)):
+        p = "\n".join(str(x) for x in p)
+    return str(p or "").strip()
+
+
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         raise Stop(f"Не найден {CONFIG_PATH}.\nСкопируйте config.example.json в config.json и заполните его.")
@@ -137,6 +169,30 @@ def load_config() -> dict:
     if "your.address" in cfg.get("email", "") or "xxxx" in cfg.get("app_password", ""):
         raise Stop("Заполните email и app_password в config.json.")
     cfg["llm_server"] = {**DEFAULT_SERVER, **cfg.get("llm_server", {})}
+    cfg["prompts"] = {**DEFAULT_PROMPTS, **cfg.get("prompts", {})}
+    for key in ("classify", "digest"):
+        if not prompt_text(cfg["prompts"][key]):
+            raise Stop(f"Пустой промпт prompts.{key} в config.json.")
+    rules = cfg["prompts"]["rules"]
+    if isinstance(rules, str):
+        rules = [rules]
+    cfg["prompts"]["rules"] = [str(r).strip() for r in rules if str(r).strip()]
+
+    cats = cfg.get("categories")
+    if not isinstance(cats, dict) or not cats:
+        raise Stop("В config.json нет списка categories (категория: описание).")
+    for name in cats:
+        if not name.strip() or any(c in name for c in '"\\'):
+            raise Stop(f"Недопустимое имя категории: «{name}» (нельзя пустое, кавычки и \\).")
+    fallback = cfg.get("fallback_category") or list(cats)[-1]
+    if fallback not in cats:
+        raise Stop(f"fallback_category «{fallback}» нет среди categories.")
+    cfg["fallback_category"] = fallback
+    unknown = [c for c in cfg.get("archive_categories", []) if c not in cats]
+    if unknown:
+        raise Stop("В archive_categories есть категории, которых нет в categories: "
+                   + ", ".join(unknown))
+
     port = cfg["llm_server"]["port"]
     cfg["llm_base"] = f"http://127.0.0.1:{port}"
     cfg["llm_url"] = cfg["llm_base"] + "/v1/chat/completions"
@@ -243,6 +299,40 @@ def llm_call(cfg: dict, messages: list, schema, max_tokens: int) -> str:
     return data["choices"][0]["message"]["content"]
 
 
+def classify_prompt(cfg: dict) -> str:
+    """Системный промпт разбора: шаблон prompts.classify + категории + доп. правила."""
+    cat_lines = "\n".join(f"- {k}: {v}" for k, v in cfg["categories"].items())
+    text = prompt_text(cfg["prompts"]["classify"])
+    if "{categories}" in text:
+        text = text.replace("{categories}", cat_lines)
+    else:
+        text += "\n\nКатегории (category — ровно одна из них):\n" + cat_lines
+    rules = cfg["prompts"]["rules"]
+    if rules:
+        text += ("\n\nДополнительные правила пользователя (важнее общих указаний выше):\n"
+                 + "\n".join(f"- {r}" for r in rules))
+    return text
+
+
+def parse_json(content: str):
+    """Достаёт JSON-объект из ответа модели; None, если не получилось."""
+    if not content:
+        return None
+    s = content.strip()
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s)  # ответ в ```json ... ```
+    try:
+        res = json.loads(s)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", s, re.S)  # JSON внутри постороннего текста
+        if not m:
+            return None
+        try:
+            res = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+    return res if isinstance(res, dict) else None
+
+
 def classify(cfg: dict, mail: dict) -> dict:
     cats = cfg["categories"]
     names = list(cats)
@@ -256,28 +346,24 @@ def classify(cfg: dict, mail: dict) -> dict:
         },
         "required": ["category", "importance", "needs_reply", "summary"],
     }
-    cat_lines = "\n".join(f"- {k}: {v}" for k, v in cats.items())
-    system = (
-        "Ты помощник, который разбирает входящую почту пользователя. Для письма определи:\n"
-        f"category — ровно одна категория из списка:\n{cat_lines}\n"
-        "importance — «высокая» (нужно внимание скоро: деньги, сроки, безопасность аккаунта, "
-        "личное письмо от реального человека, рабочий вопрос), «средняя» или «низкая» "
-        "(массовые рассылки, реклама, рядовые автоуведомления).\n"
-        "needs_reply — true, только если реальный человек ждёт ответа именно от пользователя.\n"
-        "summary — одно короткое предложение по-русски: суть письма и что нужно сделать, если нужно.\n"
-        "Отвечай только JSON."
-    )
+    system = classify_prompt(cfg)
     user = (
         f"От: {mail['from']}\nКому: {mail['to']}\nТема: {mail['subject']}\n"
         f"Дата: {mail['date']}\n"
         f"Есть ссылка отписки (List-Unsubscribe): {'да' if mail['unsub'] else 'нет'}\n\n"
         f"{mail['body'] or '(пустое письмо)'}"
     )
-    content = llm_call(cfg, [{"role": "system", "content": system},
-                             {"role": "user", "content": user}], schema, 400)
-    res = json.loads(content)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    res = None
+    for attempt in (1, 2):  # модель изредка возвращает обрезанный или битый JSON — пробуем ещё раз
+        content = llm_call(cfg, messages, schema, CLASSIFY_MAX_TOKENS)
+        res = parse_json(content)
+        if res is not None:
+            break
+    if res is None:
+        raise RuntimeError("модель вернула не JSON: " + (content or "")[:200])
     if res.get("category") not in cats:
-        res["category"] = names[-1]
+        res["category"] = cfg["fallback_category"]
     if res.get("importance") not in IMPORTANCE:
         res["importance"] = "средняя"
     res["needs_reply"] = bool(res.get("needs_reply"))
@@ -294,9 +380,7 @@ def digest(cfg: dict, results: list) -> str:
         f"{', ждут ответа' if r['needs_reply'] else ''}] {r['from']}: {r['subject']} — {r['summary']}"
         for r in items
     )
-    system = ("Ты помощник. По списку новых писем напиши короткую сводку по-русски: "
-              "3–7 пунктов, начиная с самого важного и срочного. Не выдумывай того, чего нет в списке. "
-              "Без вступлений.")
+    system = prompt_text(cfg["prompts"]["digest"])
     try:
         return llm_call(cfg, [{"role": "system", "content": system},
                               {"role": "user", "content": lines}], None, 600).strip()
@@ -339,7 +423,7 @@ def archive(imap, uid: bytes):
         raise RuntimeError(f"не удалось архивировать: {data}")
 
 
-def fetch_mail(imap, uid: bytes) -> dict:
+def fetch_mail(imap, uid: bytes, account: str) -> dict:
     typ, data = imap.uid("FETCH", uid, "(X-GM-MSGID BODY.PEEK[])")
     if typ != "OK" or not data or not isinstance(data[0], tuple):
         raise RuntimeError("не удалось получить письмо")
@@ -353,7 +437,9 @@ def fetch_mail(imap, uid: bytes) -> dict:
         "date": str(msg.get("Date", "")),
         "unsub": bool(msg.get("List-Unsubscribe")),
         "body": get_body(msg),
-        "link": f"https://mail.google.com/mail/u/0/#all/{int(m.group(1)):x}" if m else "",
+        # /u/<адрес>/ — открывает письмо именно в этом аккаунте, даже если в браузере их несколько
+        "link": (f"https://mail.google.com/mail/u/{urllib.parse.quote(account)}/#all/{int(m.group(1)):x}"
+                 if m else ""),
     }
 
 
@@ -438,7 +524,7 @@ def process_mail(cfg: dict, dry: bool, limit, log, cancel=None):
         for i, uid in enumerate(uids, 1):
             check_cancel(cancel)
             try:
-                mail = fetch_mail(imap, uid)
+                mail = fetch_mail(imap, uid, cfg["email"])
                 t0 = time.time()
                 res = classify(cfg, mail)
                 to_archive = res["category"] in archive_cats
