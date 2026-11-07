@@ -107,6 +107,16 @@ class ConfigTest(unittest.TestCase):
         bad({"categories": {'Ра"бота': "x"}, "accounts": [GMAIL]}, "Ра")
         bad({**base, "accounts": [{**GMAIL, "fallback_category": "Нет"}]}, "G", "Нет")
 
+    def test_example_config_loads(self):
+        text = (Path(__file__).resolve().parent.parent / "config.example.json").read_text(encoding="utf-8")
+        text = text.replace("your.address", "me").replace("xxxx", "abcd")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.json"
+            p.write_text(text, encoding="utf-8")
+            cfg = load_config(p)
+        self.assertEqual([a["type"] for a in cfg["accounts"]], ["gmail", "imap"])
+        self.assertEqual(cfg["accounts"][1]["folders"], {"Рассылки": "AI/Рассылки"})
+
 
 if __name__ == "__main__":
     unittest.main()

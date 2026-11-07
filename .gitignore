@@ -3,6 +3,7 @@ config.json
 
 # Результаты работы
 logs/
+state/
 reports/
 
 # Python
