@@ -20,7 +20,6 @@
   pyw gmail_ai.py --gui       — окно прогресса без вопроса
 """
 import argparse
-import html
 import sys
 import time
 import webbrowser
@@ -30,118 +29,65 @@ from mailai.common import REPORTS_DIR, Stop, check_cancel, make_logger
 from mailai.gui import ask_dialog, dpi_aware, run_gui
 from mailai.config import load_config
 from mailai.mailboxes import make_mailbox
+from mailai.report import build_report
 from mailai.llm import IMPORTANCE, classify, digest, server_ready, start_server, stop_server
 
 if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-# ---------- отчёт ----------
-
-def build_report(results: list, summary: str, dry: bool, errors: list) -> str:
-    esc = html.escape
-
-    def rows(items):
-        if not items:
-            return "<p class='empty'>—</p>"
-        out = ["<table><tr><th>От</th><th>Тема</th><th>Суть</th><th>Категория</th></tr>"]
-        for r in items:
-            subj = esc(r["subject"])
-            if r["link"]:
-                subj = f"<a href='{esc(r['link'])}' target='_blank'>{subj}</a>"
-            out.append(f"<tr class='imp-{IMPORTANCE.index(r['importance'])}'>"
-                       f"<td>{esc(r['from'])}</td><td>{subj}</td>"
-                       f"<td>{esc(r['summary'])}</td><td>{esc(r['category'])}</td></tr>")
-        out.append("</table>")
-        return "\n".join(out)
-
-    reply = [r for r in results if r["needs_reply"] and not r["archived"]]
-    important = [r for r in results if r["importance"] == "высокая"
-                 and not r["needs_reply"] and not r["archived"]]
-    rest = [r for r in results if r not in reply and r not in important and not r["archived"]]
-    rest.sort(key=lambda r: (r["category"], IMPORTANCE.index(r["importance"])))
-    archived = [r for r in results if r["archived"]]
-
-    mode = ("<p class='dry'>ТЕСТОВЫЙ РЕЖИМ: в почте ничего не изменено. "
-            "Так скрипт разложил бы письма.</p>") if dry else ""
-    err = ""
-    if errors:
-        err = "<h2>Ошибки</h2><ul>" + "".join(f"<li>{esc(e)}</li>" for e in errors) + "</ul>"
-    summ = f"<div class='summary'>{esc(summary).replace(chr(10), '<br>')}</div>" if summary else ""
-    arch_title = "Ушло бы в архив" if dry else "Убрано в архив"
-
-    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
-<title>Почта — {datetime.now():%d.%m %H:%M}</title>
-<style>
-body{{font-family:Segoe UI,Arial,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#222}}
-h1{{font-size:22px}} h2{{font-size:17px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}}
-table{{border-collapse:collapse;width:100%;font-size:14px}}
-td,th{{text-align:left;padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top}}
-th{{color:#666;font-weight:600}} td:first-child{{width:22%;color:#555}} td:last-child{{width:11%;color:#666}}
-tr.imp-0 td:nth-child(2){{font-weight:600}}
-.summary{{background:#f4f7fb;border-left:4px solid #3b6fb6;padding:12px 16px;line-height:1.5}}
-.dry{{background:#fff4d6;padding:8px 12px;border-radius:4px}} .empty{{color:#999}}
-a{{color:#1a55a8;text-decoration:none}}
-</style></head><body>
-<h1>Почта: {len(results)} новых писем — {datetime.now():%d.%m.%Y %H:%M}</h1>
-{mode}{summ}
-<h2>Ждут вашего ответа ({len(reply)})</h2>{rows(reply)}
-<h2>Важное ({len(important)})</h2>{rows(important)}
-<h2>Остальное ({len(rest)})</h2>{rows(rest)}
-<h2>{arch_title} ({len(archived)})</h2>{rows(archived)}
-{err}
-</body></html>"""
-
-
 # ---------- разбор почты ----------
 
-def process_mail(srv: dict, cfg: dict, dry: bool, limit, log, cancel=None, suffix=""):
-    """Возвращает (путь к отчёту или None, текст итога)."""
-    limit = limit or cfg.get("max_emails", 50)
-    log("Подключаюсь к Gmail…")
-    box = make_mailbox(cfg, log, dry)
+def process_mail(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) -> dict:
+    """Разбирает один ящик, возвращает AccountResult (отчёт пишет вызывающий)."""
+    limit = limit or acc.get("max_emails", 50)
+    log(f"Подключаюсь к ящику «{acc['name']}»…")
+    box = make_mailbox(acc, log, dry)
     box.connect()
+    results, errors = [], []
     try:
         uids = box.pending(limit)
         log(f"Писем для разбора: {len(uids)}" + (" (тестовый режим)" if dry else ""))
-        if not uids:
-            return None, "Новых писем нет."
-
-        results, errors = [], []
         for i, uid in enumerate(uids, 1):
             check_cancel(cancel)
             try:
                 mail = box.fetch(uid)
                 t0 = time.time()
-                res = classify(srv, cfg, mail)
+                res = classify(srv, acc, mail)
                 moved = box.apply(uid, res["category"])
-                to_archive = moved is not None
-                results.append({**mail, **res, "archived": to_archive})
-                mark = " → архив" if to_archive else ""
+                results.append({**mail, **res, "moved": moved})
+                mark = f" → {moved}" if moved is not None else ""
                 log(f"[{i}/{len(uids)}] {res['category']}{mark} | {res['importance']} | "
                     f"{mail['subject'][:60]}  ({time.time() - t0:.1f} с)")
             except Exception as e:
                 msg = f"письмо uid {uid.decode()}: {e}"
                 errors.append(msg)
                 log("ОШИБКА: " + msg)
+        warnings = list(box.warnings)
+        moved_title = box.moved_title
+        address = box.address
     finally:
         box.close()
 
-    check_cancel(cancel)
-    log("Составляю сводку…")
-    summary = digest(srv, cfg, results)
-    REPORTS_DIR.mkdir(exist_ok=True)
-    path = REPORTS_DIR / f"mail_{datetime.now():%Y-%m-%d_%H-%M}{'_test' if dry else ''}{suffix}.html"
-    path.write_text(build_report(results, summary, dry, errors), encoding="utf-8")
-    reply = sum(r["needs_reply"] and not r["archived"] for r in results)
-    arch = sum(r["archived"] for r in results)
-    total = (f"Разобрано писем: {len(results)}. Ждут ответа: {reply}. "
-             f"{'Ушло бы' if dry else 'Убрано'} в архив: {arch}."
-             + (f" Ошибок: {len(errors)}." if errors else ""))
-    log(total)
-    log(f"Отчёт: {path}")
-    webbrowser.open(path.as_uri())
-    return path, total
+    summary = ""
+    if results:
+        check_cancel(cancel)
+        log("Составляю сводку…")
+        summary = digest(srv, acc, results)
+    return {"name": acc["name"], "type": acc["type"], "address": address,
+            "moved_title": moved_title, "results": results, "summary": summary,
+            "errors": errors, "warnings": warnings, "fatal": None}
+
+
+def account_total(a: dict, dry: bool) -> str:
+    res = a["results"]
+    if not res:
+        return "Новых писем нет."
+    reply = sum(r["needs_reply"] and r["moved"] is None for r in res)
+    arch = sum(r["moved"] is not None for r in res)
+    return (f"Разобрано писем: {len(res)}. Ждут ответа: {reply}. "
+            f"{'Ушло бы' if dry else 'Убрано'} в архив: {arch}."
+            + (f" Ошибок: {len(a['errors'])}." if a["errors"] else ""))
 
 
 def pipeline(args, log, cancel=None):
@@ -154,18 +100,27 @@ def pipeline(args, log, cancel=None):
         else:
             proc = start_server(cfg["llm_server"], log, cancel)
         check_cancel(cancel)
-        gmail = [a for a in cfg["accounts"] if a["type"] == "gmail"]
-        totals = []
-        for n, acc in enumerate(cfg["accounts"], 1):
+        accounts = []
+        for acc in cfg["accounts"]:
             if acc["type"] != "gmail":
                 log(f"Ящик «{acc['name']}» пропущен: IMAP появится позже.")
                 continue
             check_cancel(cancel)
-            suffix = f"_{n}" if len(gmail) > 1 else ""
-            _, total = process_mail(cfg["llm_server"], acc, args.dry_run, args.limit,
-                                    log, cancel, suffix)
-            totals.append(f"{acc['name']}: {total}" if len(gmail) > 1 else total)
-        return chr(10).join(totals) or "Нет ящиков Gmail для разбора."
+            accounts.append(process_mail(cfg["llm_server"], acc, args.dry_run, args.limit,
+                                         log, cancel))
+        if not accounts:
+            return "Нет ящиков Gmail для разбора."
+        REPORTS_DIR.mkdir(exist_ok=True)
+        path = REPORTS_DIR / f"mail_{datetime.now():%Y-%m-%d_%H-%M}{'_test' if args.dry_run else ''}.html"
+        path.write_text(build_report(accounts, args.dry_run), encoding="utf-8")
+        log(f"Отчёт: {path}")
+        webbrowser.open(path.as_uri())
+        multi = len(accounts) > 1
+        totals = [f"{a['name']}: {account_total(a, args.dry_run)}" if multi
+                  else account_total(a, args.dry_run) for a in accounts]
+        total = chr(10).join(totals)
+        log(total)
+        return total
     finally:
         if proc is not None and cfg["llm_server"].get("stop_after", True):
             stop_server(proc, log)
