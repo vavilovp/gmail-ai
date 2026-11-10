@@ -533,6 +533,42 @@ class ImapBoxTest(unittest.TestCase):
         self.assertIn('"security": "starttls"', msg)
         sl.assert_not_called()
 
+    def test_security_none_plain_login_with_warning(self):
+        self.fake.capabilities = ("IMAP4REV1", "UIDPLUS")
+        seen = []
+        with patch("mailai.mailboxes.IMAP_PLAIN", self.plain(seen)),              patch("mailai.mailboxes.IMAP_SSL", side_effect=AssertionError("SSL не нужен")):
+            b = self.box(port=143, security="none")
+        self.assertEqual(seen[0], (("mail.corp.ru", 143), {"timeout": 60}))
+        names = [c[0] for c in self.fake.calls]
+        self.assertNotIn("starttls", names)
+        self.assertIn("login", names)
+        self.assertEqual(b.warnings, [])
+        self.assertEqual(len(b.notices), 1)
+        self.assertIn("без шифрования", b.notices[0])
+        self.assertTrue(any("без шифрования" in m for m in self.logs))
+
+    def test_security_none_logindisabled_refuses(self):
+        self.fake.capabilities = ("IMAP4REV1", "STARTTLS", "LOGINDISABLED")
+        with patch("mailai.mailboxes.IMAP_PLAIN", lambda *a, **k: self.fake),              patch("mailai.mailboxes.time.sleep") as sl:
+            b = ImapBox(acc(port=143, security="none"), self.logs.append, False, state_dir=self.state_dir)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+            b.close()
+        self.assertIn("LOGINDISABLED", str(cm.exception))
+        names = [c[0] for c in self.fake.calls]
+        self.assertNotIn("login", names)
+        self.assertIn("shutdown", names)
+        sl.assert_not_called()
+
+    def test_no_starttls_hint_mentions_none(self):
+        self.fake.capabilities = ("IMAP4REV1",)
+        with patch("mailai.mailboxes.IMAP_PLAIN", lambda *a, **k: self.fake):
+            b = ImapBox(acc(port=143), self.logs.append, False, state_dir=self.state_dir)
+            with self.assertRaises(Stop) as cm:
+                b.connect()
+        self.assertIn('"security": "none"', str(cm.exception))
+        self.assertNotIn("login", [c[0] for c in self.fake.calls])
+
     def test_search_no_raises(self):
         self.fake.fail_cmds = {"SEARCH"}
         b = self.box()

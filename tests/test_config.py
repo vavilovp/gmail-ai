@@ -81,7 +81,10 @@ class ConfigTest(unittest.TestCase):
                          "auto")
         with self.assertRaises(Stop) as cm:
             load({"categories": CATS, "accounts": [{**IMAP, "security": "tls"}]})
-        self.assertIn("Ящик «W»: security должно быть «auto», «ssl» или «starttls»", str(cm.exception))
+        self.assertIn("Ящик «W»: security должно быть «auto», «ssl», «starttls» или «none»",
+                      str(cm.exception))
+        self.assertEqual(load({"categories": CATS, "accounts": [{**IMAP, "security": "none"}]})
+                         ["accounts"][0]["security"], "none")
 
     def test_type_specific_keys_not_inherited_across_types(self):
         cfg = load({"categories": {"A": "a", "B": "b"}, "search": "in:inbox is:unread",

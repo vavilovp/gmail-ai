@@ -13,7 +13,7 @@ from pathlib import Path
 from mailai.common import STATE_DIR, Stop, imap_utf7, imap_utf7_decode, parse_message, safe_name
 
 IMAP_SSL = imaplib.IMAP4_SSL  # тесты подменяют
-IMAP_PLAIN = imaplib.IMAP4    # для STARTTLS (порт 143); тесты подменяют
+IMAP_PLAIN = imaplib.IMAP4    # для STARTTLS и security: none (порт 143); тесты подменяют
 IMAP_TIMEOUT = 60      # с: без него зависший сервер держит разбор бесконечно
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 STATE_KEEP = 5000      # сколько последних обработанных писем помнить
@@ -72,13 +72,14 @@ class Mailbox:
         self.acc, self.log, self.dry = acc, log, dry
         self.address = ""
         self.warnings: list = []
+        self.notices: list = []  # постоянные предупреждения: в отчёт, но сами по себе отчёт не вызывают
 
     def _open(self, host: str, port: int, where: str, verify: bool = True, hint: str = "",
-              starttls: bool = False):
-        """Защищённое подключение с проверкой сертификата и тайм-аутом; при сбое сети — 3 попытки.
+              starttls: bool = False, plain: bool = False):
+        """Подключение с проверкой сертификата и тайм-аутом; при сбое сети — 3 попытки.
 
         starttls=False — SSL сразу (порт 993); True — обычное соединение и команда STARTTLS
-        (порт 143). Без шифрования вход не выполняется никогда.
+        (порт 143). plain=True — без шифрования вообще: только по явному "security": "none".
         """
         ctx = ssl.create_default_context()  # системное хранилище сертификатов Windows
         if not verify:
@@ -89,6 +90,8 @@ class Mailbox:
         last = None
         for attempt in range(1, 4):  # при входе в систему сеть может подняться не сразу
             try:
+                if plain:
+                    return self._plain(IMAP_PLAIN(host, port, timeout=IMAP_TIMEOUT), host)
                 if not starttls:
                     return IMAP_SSL(host, port, ssl_context=ctx, timeout=IMAP_TIMEOUT)
                 imap = IMAP_PLAIN(host, port, timeout=IMAP_TIMEOUT)
@@ -110,6 +113,20 @@ class Mailbox:
         return Stop(f"Ящик «{self.acc['name']}»: сертификат сервера не прошёл проверку "
                     f"({getattr(e, 'verify_message', None) or e}).{hint}")
 
+    def _plain(self, imap, host: str):
+        """Соединение без шифрования (security: none): предупредить; отказать, если сервер запрещает вход."""
+        caps = {str(c).upper() for c in getattr(imap, "capabilities", ())}
+        if "LOGINDISABLED" in caps:
+            _shutdown(imap)
+            raise Stop(f"Ящик «{self.acc['name']}»: сервер {host} запрещает вход без шифрования "
+                       "(LOGINDISABLED). Уберите \"security\": \"none\" — попробуйте \"starttls\" "
+                       "или порт с SSL (обычно 993).")
+        msg = (f"Соединение с {host} без шифрования (security: none): пароль и письма передаются "
+               "открытым текстом.")
+        self.log("Внимание: " + msg)
+        self.notices.append(msg)
+        return imap
+
     def _starttls(self, imap, ctx, host: str, hint: str):
         """Включить шифрование на обычном соединении; иначе закрыть его и не входить."""
         try:
@@ -117,7 +134,9 @@ class Mailbox:
             if "STARTTLS" not in caps:
                 raise Stop(f"Ящик «{self.acc['name']}»: сервер {host} не поддерживает STARTTLS — "
                            "вход без шифрования не выполняется, чтобы не передавать пароль открытым "
-                           "текстом. Узнайте у администратора порт с SSL (обычно 993).")
+                           "текстом. Узнайте у администратора порт с SSL (обычно 993). Если шифрования на "
+                           "сервере нет совсем, а сеть доверенная (например, VPN) — укажите "
+                           "\"security\": \"none\" в настройках ящика.")
             imap.starttls(ssl_context=ctx)
         except ssl.SSLCertVerificationError as e:
             _shutdown(imap)
@@ -316,7 +335,7 @@ class ImapBox(Mailbox):
         sec = self.acc.get("security", "auto")
         starttls = sec == "starttls" or (sec == "auto" and port == 143)
         imap = self._open(host, port, host, verify=self.acc.get("verify_cert", True),
-                          starttls=starttls,
+                          starttls=starttls, plain=sec == "none",
                           hint=" Если это корпоративный сервер с собственным сертификатом — "
                                'добавьте "verify_cert": false в настройки ящика.')
         self.imap = imap  # сразу: close() отключится, даже если вход не удался

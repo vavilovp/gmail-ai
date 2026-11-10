@@ -29,6 +29,7 @@ class FakeBox:
         self.mails = list(mails)
         self.connect_exc, self.pending_exc, self.on_apply = connect_exc, pending_exc, on_apply
         self.address, self.moved_title, self.warnings = "me@x.org", "Убрано в архив", []
+        self.notices = []
         self.applied, self.closed = [], 0
 
     def connect(self):
@@ -303,6 +304,17 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(self.ok)
         self.assertEqual(self.reports, [])
         wb.assert_not_called()
+
+    def test_notice_alone_no_report_but_shown_with_mail(self):
+        box = FakeBox([])
+        box.notices = ["без шифрования"]
+        total, wb, _, _ = self.run_pipeline([box], [acc("A", "imap")])
+        self.assertEqual(total, "Новых писем нет.")
+        self.assertEqual(self.reports, [])
+        box = FakeBox([(b"1", None)])
+        box.notices = ["без шифрования"]
+        self.run_pipeline([box], [acc("A", "imap")])
+        self.assertIn("без шифрования", self.texts[-1])
 
     def test_model_started_once_and_stopped(self):
         _, _, st, sp = self.run_pipeline(

@@ -94,7 +94,8 @@ def process_account(srv: dict, acc: dict, dry: bool, limit, log, cancel=None) ->
             alog("ОШИБКА: " + summary)
     return {"name": name, "type": acc["type"], "address": address,
             "moved_title": moved_title, "results": results, "summary": summary,
-            "errors": errors, "warnings": list(box.warnings), "fatal": fatal}
+            "errors": errors, "warnings": list(box.warnings) + list(box.notices),
+            "notices": len(box.notices), "fatal": fatal}
 
 
 def account_line(a: dict) -> str:
@@ -120,7 +121,8 @@ def pipeline(args, log, cancel=None):
         for acc in cfg["accounts"]:
             check_cancel(cancel)
             accounts.append(process_account(srv, acc, args.dry_run, args.limit, log, cancel))
-        if not any(a["results"] or a["errors"] or a["warnings"] or a["fatal"] for a in accounts):
+        if not any(a["results"] or a["errors"] or len(a["warnings"]) > a.get("notices", 0) or a["fatal"]
+                   for a in accounts):  # постоянные предупреждения (notices) отчёт не вызывают
             total = "Новых писем нет."
         else:
             REPORTS_DIR.mkdir(exist_ok=True)
